@@ -68,12 +68,20 @@ def add_custom_header(doc):
 
 
 def add_centered_page_number(doc):
+    """添加居中页码，格式为：第X页/共Y页"""
     for section in doc.sections:
         footer = section.footer
         p = footer.add_paragraph()
         para_format = p.paragraph_format
         para_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
+        # 添加"第"
+        run = p.add_run("第")
+        run.font.name = "宋体"
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), "宋体")
+        run.font.size = Pt(12)
+
+        # 添加当前页码域
         run = p.add_run()
         fld_char_begin = OxmlElement('w:fldChar')
         fld_char_begin.set(qn('w:fldCharType'), 'begin')
@@ -83,9 +91,43 @@ def add_centered_page_number(doc):
         instr_text.text = "PAGE"
         run._r.append(instr_text)
 
+        fld_char_sep = OxmlElement('w:fldChar')
+        fld_char_sep.set(qn('w:fldCharType'), 'separate')
+        run._r.append(fld_char_sep)
+
         fld_char_end = OxmlElement('w:fldChar')
         fld_char_end.set(qn('w:fldCharType'), 'end')
         run._r.append(fld_char_end)
+
+        # 添加"页/共"
+        run = p.add_run("页/共")
+        run.font.name = "宋体"
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), "宋体")
+        run.font.size = Pt(12)
+
+        # 添加总页数域
+        run = p.add_run()
+        fld_char_begin = OxmlElement('w:fldChar')
+        fld_char_begin.set(qn('w:fldCharType'), 'begin')
+        run._r.append(fld_char_begin)
+
+        instr_text = OxmlElement('w:instrText')
+        instr_text.text = "NUMPAGES"
+        run._r.append(instr_text)
+
+        fld_char_sep = OxmlElement('w:fldChar')
+        fld_char_sep.set(qn('w:fldCharType'), 'separate')
+        run._r.append(fld_char_sep)
+
+        fld_char_end = OxmlElement('w:fldChar')
+        fld_char_end.set(qn('w:fldCharType'), 'end')
+        run._r.append(fld_char_end)
+
+        # 添加"页"
+        run = p.add_run("页")
+        run.font.name = "宋体"
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), "宋体")
+        run.font.size = Pt(12)
 
 
 def replace_patterns_in_paragraph(paragraph):
@@ -163,7 +205,7 @@ def process_word_file(file_path, keep_backup):
 # ------------------------------
 # 辅助功能区：格式转换功能
 # ------------------------------
-def batch_convert_doc_to_docx(root_dir, keep_source):
+def batch_convert_doc_to_docx(root_dir, keep_source, status_var):
     root_dir = os.path.normpath(root_dir)
     word = win32com.client.Dispatch("Word.Application")
     word.Visible = False
@@ -176,35 +218,44 @@ def batch_convert_doc_to_docx(root_dir, keep_source):
     skipped_delete = 0
     error_details = []
 
+    # 先统计总文件数
+    doc_files = []
     for foldername, _, filenames in os.walk(root_dir):
         for filename in filenames:
             lower_name = filename.lower()
             if lower_name.endswith(".doc") and not lower_name.endswith(".docx"):
-                total += 1
-                doc_path = os.path.join(foldername, filename)
-                docx_name = f"{os.path.splitext(filename)[0]}.docx"
-                docx_path = os.path.join(foldername, docx_name)
+                doc_files.append(os.path.join(foldername, filename))
+    total = len(doc_files)
 
-                if not os.path.exists(docx_path):
-                    try:
-                        doc = word.Documents.Open(os.path.abspath(doc_path))
-                        doc.SaveAs2(os.path.abspath(docx_path), FileFormat=12)
-                        doc.Close()
-                        converted += 1
-                    except Exception as e:
-                        error_details.append(f"转换失败：{filename} - {str(e).split(',')[0]}")
-                        continue
-                else:
-                    skipped_convert += 1
+    # 开始转换
+    for i, doc_path in enumerate(doc_files):
+        filename = os.path.basename(doc_path)
+        status_var.set(f"正在转换DOC→DOCX ({i + 1}/{total})：{filename}")
+        root.update_idletasks()
 
-                if not keep_source:
-                    if os.path.exists(doc_path):
-                        try:
-                            os.remove(doc_path)
-                            deleted += 1
-                        except Exception as e:
-                            skipped_delete += 1
-                            error_details.append(f"删除失败：{filename} - {str(e)}")
+        docx_name = f"{os.path.splitext(filename)[0]}.docx"
+        docx_path = os.path.join(os.path.dirname(doc_path), docx_name)
+
+        if not os.path.exists(docx_path):
+            try:
+                doc = word.Documents.Open(os.path.abspath(doc_path))
+                doc.SaveAs2(os.path.abspath(docx_path), FileFormat=12)
+                doc.Close()
+                converted += 1
+            except Exception as e:
+                error_details.append(f"转换失败：{filename} - {str(e).split(',')[0]}")
+                continue
+        else:
+            skipped_convert += 1
+
+        if not keep_source:
+            if os.path.exists(doc_path):
+                try:
+                    os.remove(doc_path)
+                    deleted += 1
+                except Exception as e:
+                    skipped_delete += 1
+                    error_details.append(f"删除失败：{filename} - {str(e)}")
 
     word.Quit()
 
@@ -218,33 +269,31 @@ def batch_convert_doc_to_docx(root_dir, keep_source):
     if error_details:
         result_msg += "\n错误详情：\n" + "\n".join(error_details[:5])
     messagebox.showinfo("DOC转DOCX结果", result_msg)
+    status_var.set("就绪")
 
 
-def batch_convert_docx_to_pdf(root_dir, use_separate_folder, apply_to_all_var):
-    """
-    批量转换docx到pdf，处理文件冲突：
-    - 存在同名文件时询问是否替换
-    - 支持"应用于所有"选项，一次性决定后续所有冲突
-    """
+def batch_convert_docx_to_pdf(root_dir, use_separate_folder, status_var):
     root_dir = os.path.normpath(root_dir)
     docx_files = get_all_files_by_ext(root_dir, ['.docx'])
     total = len(docx_files)
     success = 0
-    replaced = 0  # 替换的文件数
-    skipped = 0  # 跳过的文件数
+    replaced = 0
+    skipped = 0
     fail = 0
     error_details = []
 
-    # 冲突处理状态变量
     apply_to_all = False
-    global_decision = None  # 全局决定：True=替换所有，False=跳过所有
+    global_decision = None
 
     if use_separate_folder:
         output_root = os.path.join(root_dir, "docx2pdf")
         os.makedirs(output_root, exist_ok=True)
 
     for i, docx_path in enumerate(docx_files):
-        # 确定PDF保存路径
+        filename = os.path.basename(docx_path)
+        status_var.set(f"正在转换DOCX→PDF ({i + 1}/{total})：{filename}")
+        root.update_idletasks()
+
         if use_separate_folder:
             relative_path = os.path.relpath(docx_path, root_dir)
             pdf_path = os.path.join(output_root, f"{os.path.splitext(relative_path)[0]}.pdf")
@@ -252,34 +301,26 @@ def batch_convert_docx_to_pdf(root_dir, use_separate_folder, apply_to_all_var):
         else:
             pdf_path = f"{os.path.splitext(docx_path)[0]}.pdf"
 
-        # 检查文件是否存在
         if os.path.exists(pdf_path):
-            # 处理冲突
             if apply_to_all:
-                # 使用全局决定
                 if global_decision:
-                    # 替换现有文件
                     pass
                 else:
-                    # 跳过
                     skipped += 1
                     continue
             else:
-                # 弹出询问对话框
-                filename = os.path.basename(pdf_path)
                 dialog = tk.Toplevel()
                 dialog.title("文件已存在")
                 dialog.geometry("400x150")
-                dialog.transient(root)  # 设置为主窗口的子窗口
-                dialog.grab_set()  # 模态窗口，阻止操作主窗口
+                dialog.transient(root)
+                dialog.grab_set()
 
-                ttk.Label(dialog, text=f"文件 '{filename}' 已存在，是否替换？").pack(pady=10, padx=10)
+                ttk.Label(dialog, text=f"文件 '{os.path.basename(pdf_path)}' 已存在，是否替换？").pack(pady=10, padx=10)
 
-                # 应用于所有选项
                 apply_var = tk.BooleanVar(value=False)
                 ttk.Checkbutton(dialog, text="对后续所有文件应用此选择", variable=apply_var).pack(anchor=tk.W, padx=20)
 
-                decision = None  # 存储用户决定
+                decision = None
 
                 def on_replace():
                     nonlocal decision
@@ -296,14 +337,12 @@ def batch_convert_docx_to_pdf(root_dir, use_separate_folder, apply_to_all_var):
                 ttk.Button(btn_frame, text="替换", command=on_replace).pack(side=tk.LEFT, padx=5)
                 ttk.Button(btn_frame, text="跳过", command=on_skip).pack(side=tk.LEFT, padx=5)
 
-                dialog.wait_window()  # 等待对话框关闭
+                dialog.wait_window()
 
                 if decision is None:
-                    # 对话框被关闭，视为跳过
                     skipped += 1
                     continue
 
-                # 记录是否应用于所有
                 if apply_var.get():
                     apply_to_all = True
                     global_decision = decision
@@ -318,10 +357,9 @@ def batch_convert_docx_to_pdf(root_dir, use_separate_folder, apply_to_all_var):
             if os.path.exists(pdf_path) and (apply_to_all and global_decision or not apply_to_all):
                 replaced += 1
         except Exception as e:
-            error_details.append(f"{os.path.basename(docx_path)}：{str(e)}")
+            error_details.append(f"{filename}：{str(e)}")
             fail += 1
 
-    # 生成结果信息
     result_msg = (f"转换完成！\n总文件：{total}\n"
                   f"成功转换：{success - replaced} | 替换现有：{replaced} | 跳过：{skipped} | 失败：{fail}\n")
     if use_separate_folder:
@@ -332,6 +370,7 @@ def batch_convert_docx_to_pdf(root_dir, use_separate_folder, apply_to_all_var):
     if error_details:
         result_msg += f"\n\n错误详情：\n" + "\n".join(error_details[:5])
     messagebox.showinfo("DOCX转PDF结果", result_msg)
+    status_var.set("就绪")
 
 
 # ------------------------------
@@ -355,8 +394,7 @@ def main():
         'keep_backup': tk.BooleanVar(value=True),
         # 辅助功能选项
         'keep_source_doc': tk.BooleanVar(value=True),
-        'docx2pdf_separate_folder': tk.BooleanVar(value=False),
-        'docx2pdf_apply_to_all': tk.BooleanVar(value=False)  # 应用于所有选项
+        'docx2pdf_separate_folder': tk.BooleanVar(value=False)
     }
 
     # 主框架
@@ -392,7 +430,8 @@ def main():
 
     col2 = ttk.Frame(options_frame)
     col2.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    ttk.Checkbutton(col2, text="添加居中页码", variable=options['add_page_number']).pack(anchor=tk.W, pady=2)
+    ttk.Checkbutton(col2, text="添加居中页码（格式：第X页/共Y页）", variable=options['add_page_number']).pack(anchor=tk.W,
+                                                                                                           pady=2)
     ttk.Checkbutton(col2, text="替换指定文本模式", variable=options['replace_patterns']).pack(anchor=tk.W, pady=2)
 
     # 保存选项
@@ -403,7 +442,7 @@ def main():
         variable=options['keep_backup']
     ).pack(anchor=tk.W, pady=(0, 15))
 
-    # 主功能处理按钮
+    # 状态显示区（所有功能共用）
     status_var = tk.StringVar(value="就绪")
     ttk.Label(main_frame, textvariable=status_var, wraplength=650).pack(anchor=tk.W, pady=(0, 10))
 
@@ -429,7 +468,7 @@ def main():
         errors = []
 
         for i, file_path in enumerate(word_files):
-            status_var.set(f"正在处理 {i + 1}/{total}：{os.path.basename(file_path)}")
+            status_var.set(f"正在处理Word文件 ({i + 1}/{total})：{os.path.basename(file_path)}")
             root.update_idletasks()
             res, msg = process_word_file(file_path, keep_backup)
             if res:
@@ -469,10 +508,7 @@ def main():
         if not folder or folder == "等待选择文件夹...":
             messagebox.showwarning("警告", "请先选择文件夹")
             return
-        status_var.set("正在进行DOC转DOCX...")
-        root.update_idletasks()
-        batch_convert_doc_to_docx(folder, options['keep_source_doc'].get())
-        status_var.set("就绪")
+        batch_convert_doc_to_docx(folder, options['keep_source_doc'].get(), status_var)
 
     ttk.Button(main_frame, text="批量转换DOC→DOCX", command=convert_doc_action).pack(pady=(0, 10))
 
@@ -489,14 +525,7 @@ def main():
         if not folder or folder == "等待选择文件夹...":
             messagebox.showwarning("警告", "请先选择文件夹")
             return
-        status_var.set("正在进行DOCX转PDF...")
-        root.update_idletasks()
-        batch_convert_docx_to_pdf(
-            folder,
-            options['docx2pdf_separate_folder'].get(),
-            options['docx2pdf_apply_to_all'].get()
-        )
-        status_var.set("就绪")
+        batch_convert_docx_to_pdf(folder, options['docx2pdf_separate_folder'].get(), status_var)
 
     ttk.Button(main_frame, text="批量转换DOCX→PDF", command=convert_pdf_action).pack(pady=(0, 10))
 
