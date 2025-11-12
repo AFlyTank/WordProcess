@@ -41,7 +41,8 @@ def remove_header_footer(doc):
         for para in reversed(header.paragraphs):
             p_element = para._element
             parent = p_element.getparent()
-            if parent:
+            # 将 if parent: 改为 if parent is not None:
+            if parent is not None:
                 parent.remove(p_element)
             para._p = None
             para._element = None
@@ -50,11 +51,11 @@ def remove_header_footer(doc):
         for para in reversed(footer.paragraphs):
             p_element = para._element
             parent = p_element.getparent()
-            if parent:
+            # 将 if parent: 改为 if parent is not None:
+            if parent is not None:
                 parent.remove(p_element)
             para._p = None
             para._element = None
-
 
 def add_custom_header(doc):
     for section in doc.sections:
