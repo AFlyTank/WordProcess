@@ -48,20 +48,23 @@ def get_all_files_by_ext(folder_path, exts):
 # 主功能区：Word处理功能
 # ------------------------------
 def remove_header_footer(doc):
-    """删除文档中所有节的页眉页脚内容"""
+    """删除文档中所有节的页眉页脚内容，并断开节链接"""
     for section in doc.sections:
-        # 处理页眉
+        # 关键：断开当前节与前一节的页眉页脚链接
+        section.header.is_linked_to_previous = False
+        section.footer.is_linked_to_previous = False
+
+        # 原有删除页眉逻辑
         header = section.header
-        # 反向遍历段落（避免删除时索引错乱）
         for para in reversed(header.paragraphs):
-            p_element = para._element  # 获取段落的XML元素
-            parent = p_element.getparent()  # 获取父节点
+            p_element = para._element
+            parent = p_element.getparent()
             if parent is not None:
-                parent.remove(p_element)  # 从父节点中移除当前段落
-            para._p = None  # 清除段落引用
+                parent.remove(p_element)
+            para._p = None
             para._element = None
 
-        # 处理页脚（逻辑同页眉）
+        # 原有删除页脚逻辑
         footer = section.footer
         for para in reversed(footer.paragraphs):
             p_element = para._element
@@ -73,64 +76,67 @@ def remove_header_footer(doc):
 
 
 def add_custom_header(doc):
-    """为文档所有节添加自定义页眉（内容：学为人师，行为世范）"""
+    """为文档所有节添加自定义页眉（学为人师，行为世范），距离顶端0.7cm，避免重复"""
+    from docx.shared import Cm  # 确保导入厘米单位类（若已导入可忽略）
+
     for section in doc.sections:
+        # 1. 设置页眉距离顶端 0.7cm（核心新增）
+        section.header_distance = Cm(0.7)  # 直接用厘米单位，无需手动换算
+
+        # 2. 强制清空当前节页眉（去重逻辑，保留）
         header = section.header
-        para = header.add_paragraph()  # 添加新段落
-        para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT  # 左对齐
-        run = para.add_run("学为人师，行为世范")  # 添加文本
-        # 设置字体（同时支持英文字体和中文字体）
+        for para in reversed(header.paragraphs):
+            p_element = para._element
+            parent = p_element.getparent()
+            if parent is not None:
+                parent.remove(p_element)
+            para._p = None
+            para._element = None
+
+        # 3. 添加新页眉内容（原有逻辑不变）
+        para = header.add_paragraph()
+        para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = para.add_run("学为人师，行为世范")
         run.font.name = "华文行楷"
-        run._element.rPr.rFonts.set(qn('w:eastAsia'), "华文行楷")  # 中文字体设置
-        run.font.size = Pt(12)  # 字体大小12磅
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), "华文行楷")
+        run.font.size = Pt(12)
 
 
 def add_centered_page_number(doc):
-    """为文档所有节添加居中页码，格式为：第X页/共Y页"""
-    for section in doc.sections:
-        footer = section.footer
-        p = footer.add_paragraph()  # 添加页脚段落
-        para_format = p.paragraph_format
-        para_format.alignment = WD_ALIGN_PARAGRAPH.CENTER  # 居中对齐
+    """为文档所有节添加居中页码（第X页/共Y页），距离底端1cm，避免重复"""
+    from docx.shared import Cm  # 确保导入厘米单位类（若已导入可忽略）
 
-        # 添加"第"字
+    for section in doc.sections:
+        # 1. 设置页脚距离底端 1cm（核心新增）
+        section.footer_distance = Cm(1.0)
+
+        # 2. 强制清空当前节页脚（去重逻辑，保留）
+        footer = section.footer
+        for para in reversed(footer.paragraphs):
+            p_element = para._element
+            parent = p_element.getparent()
+            if parent is not None:
+                parent.remove(p_element)
+            para._p = None
+            para._element = None
+
+        # 3. 原有添加页码的完整逻辑（保持不变）
+        p = footer.add_paragraph()
+        para_format = p.paragraph_format
+        para_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
         run = p.add_run("第")
         run.font.name = "宋体"
         run._element.rPr.rFonts.set(qn('w:eastAsia'), "宋体")
         run.font.size = Pt(12)
 
-        # 添加当前页码域（Word中的PAGE域）
-        run = p.add_run()
-        fld_char_begin = OxmlElement('w:fldChar')
-        fld_char_begin.set(qn('w:fldCharType'), 'begin')  # 域开始标记
-        run._r.append(fld_char_begin)
-
-        instr_text = OxmlElement('w:instrText')
-        instr_text.text = "PAGE"  # 页码域指令
-        run._r.append(instr_text)
-
-        fld_char_sep = OxmlElement('w:fldChar')
-        fld_char_sep.set(qn('w:fldCharType'), 'separate')  # 域分隔标记
-        run._r.append(fld_char_sep)
-
-        fld_char_end = OxmlElement('w:fldChar')
-        fld_char_end.set(qn('w:fldCharType'), 'end')  # 域结束标记
-        run._r.append(fld_char_end)
-
-        # 添加"页/共"
-        run = p.add_run("页/共")
-        run.font.name = "宋体"
-        run._element.rPr.rFonts.set(qn('w:eastAsia'), "宋体")
-        run.font.size = Pt(12)
-
-        # 添加总页数域（Word中的NUMPAGES域）
         run = p.add_run()
         fld_char_begin = OxmlElement('w:fldChar')
         fld_char_begin.set(qn('w:fldCharType'), 'begin')
         run._r.append(fld_char_begin)
 
         instr_text = OxmlElement('w:instrText')
-        instr_text.text = "NUMPAGES"  # 总页数域指令
+        instr_text.text = "PAGE"
         run._r.append(instr_text)
 
         fld_char_sep = OxmlElement('w:fldChar')
@@ -141,12 +147,32 @@ def add_centered_page_number(doc):
         fld_char_end.set(qn('w:fldCharType'), 'end')
         run._r.append(fld_char_end)
 
-        # 添加"页"字
-        run = p.add_run("页")
+        run = p.add_run("页/共")
         run.font.name = "宋体"
         run._element.rPr.rFonts.set(qn('w:eastAsia'), "宋体")
         run.font.size = Pt(12)
 
+        run = p.add_run()
+        fld_char_begin = OxmlElement('w:fldChar')
+        fld_char_begin.set(qn('w:fldCharType'), 'begin')
+        run._r.append(fld_char_begin)
+
+        instr_text = OxmlElement('w:instrText')
+        instr_text.text = "NUMPAGES"
+        run._r.append(instr_text)
+
+        fld_char_sep = OxmlElement('w:fldChar')
+        fld_char_sep.set(qn('w:fldCharType'), 'separate')
+        run._r.append(fld_char_sep)
+
+        fld_char_end = OxmlElement('w:fldChar')
+        fld_char_end.set(qn('w:fldCharType'), 'end')
+        run._r.append(fld_char_end)
+
+        run = p.add_run("页")
+        run.font.name = "宋体"
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), "宋体")
+        run.font.size = Pt(12)
 
 def replace_patterns_in_paragraph(paragraph):
     """
