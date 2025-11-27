@@ -99,6 +99,21 @@ def remove_header_footer(doc):
 def add_custom_header(doc):
     """为文档所有节添加自定义页眉，距离顶端0.7cm，避免重复"""
     for section in doc.sections:
+        # ========== 新增代码 START ==========
+        # 关闭“不同首页页眉页脚”+“不同奇偶页页眉页脚”（核心！）
+        sectPr = section._sectPr
+        # 移除“不同首页”设置
+        if sectPr.find(qn('w:titlePg')) is not None:
+            sectPr.remove(sectPr.find(qn('w:titlePg')))
+        # 移除“不同奇偶页”设置
+        if sectPr.find(qn('w:evenAndOddHeaders')) is not None:
+            sectPr.remove(sectPr.find(qn('w:evenAndOddHeaders')))
+        # 强制所有页面共用页眉区域
+        evenAndOdd = OxmlElement('w:evenAndOddHeaders')
+        evenAndOdd.set(qn('w:val'), '0')
+        sectPr.append(evenAndOdd)
+        # ========== 新增代码 END ==========
+
         # 1. 设置页眉距离顶端 0.7cm
         section.header_distance = Cm(0.7)
 
@@ -125,6 +140,20 @@ def add_custom_header(doc):
 def add_centered_page_number(doc):
     """为文档所有节添加居中页码（第X页/共Y页），距离底端1cm，避免重复"""
     for section in doc.sections:
+        # ========== 新增代码 START ==========
+        # 关闭“不同首页页眉页脚”+“不同奇偶页页眉页脚”（核心！）
+        sectPr = section._sectPr
+        # 移除“不同首页”设置
+        if sectPr.find(qn('w:titlePg')) is not None:
+            sectPr.remove(sectPr.find(qn('w:titlePg')))
+        # 移除“不同奇偶页”设置
+        if sectPr.find(qn('w:evenAndOddHeaders')) is not None:
+            sectPr.remove(sectPr.find(qn('w:evenAndOddHeaders')))
+        # 强制所有页面共用页眉区域
+        evenAndOdd = OxmlElement('w:evenAndOddHeaders')
+        evenAndOdd.set(qn('w:val'), '0')
+        sectPr.append(evenAndOdd)
+        # ========== 新增代码 END ==========
         # 1. 设置页脚距离底端 1cm
         section.footer_distance = Cm(1.0)
 
@@ -253,7 +282,7 @@ def set_outline_level(doc):
 
     # 组合所有匹配模式
     pattern = (
-            r'(题型|考点|考法)(?:\d+|' + chinese_nums + r').*'
+            r'(题型|考点|考法|知识点|易错点|重难点)(?:\d+|' + chinese_nums + r').*'
             r'|^\s*(?:A夯实基础|B能力提升|C综合素养)\s*$'
             r'|第(?:\d+|' + chinese_nums + r')(章|单元).*'
     )
