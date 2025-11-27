@@ -8,17 +8,33 @@ from docx import Document  # 用于docx文档基本操作
 from docx.enum.text import WD_ALIGN_PARAGRAPH  # 用于段落对齐设置
 from docx.oxml import OxmlElement  # 用于操作XML元素
 from docx.oxml.ns import qn  # 用于设置XML命名空间
-from docx2pdf import convert  # 用于docx转pdf
-from docx.shared import Pt  # 用于设置字体大小
+from docx.shared import Pt, Cm  # 用于设置字体大小和厘米单位
+import concurrent.futures  # 用于线程池并行处理
+import threading  # 用于线程锁和线程管理
 
+# ------------------------------
+# 全局变量（并行处理+正则缓存）
+# ------------------------------
+# 正则缓存（全局编译，只解析一次，提升速度）
+english_pattern = re.compile(r'\(([012]\d)[^()]*?[\u4e00-\u9fa5][^()]{0,10}\)')  # 英文小括号
+chinese_pattern = re.compile(r'（([012]\d)[^（）]*?[\u4e00-\u9fa5][^（）]{0,10}）')  # 中文小括号
+k_pattern = re.compile(r'\[([012]\d)[^\]]*?[\u4e00-\u9fa5][^\]]{0,10}\]')  # 英文中括号
+
+# 并行处理进度统计（线程安全）
+progress_lock = threading.Lock()
+processed_count = 0  # 已处理文件数
+success_count = 0    # 成功文件数
+error_list = []      # 错误列表
+options = {}  # 全局配置选项
+root = None  # 主窗口对象
+process_btn = None  # 处理按钮对象
+status_var = None  # 状态显示变量
 
 # ------------------------------
 # 通用工具函数
 # ------------------------------
 def select_folder():
     """选择文件夹并返回路径，若取消选择则返回None"""
-    root = tk.Tk()
-    root.withdraw()  # 隐藏主窗口
     folder_path = filedialog.askdirectory(title="选择文件夹")
     return folder_path if folder_path else None
 
@@ -33,14 +49,14 @@ def get_all_files_by_ext(folder_path, exts):
     exts = [ext.lower() for ext in exts]  # 统一转为小写便于匹配
     files = []
     # 遍历文件夹及其子文件夹
-    for root, _, filenames in os.walk(folder_path):
+    for root_dir, _, filenames in os.walk(folder_path):
         for filename in filenames:
             # 过滤Word临时文件（以~$开头的文件）
             if filename.startswith('~$'):
                 continue
             # 检查文件是否符合任一扩展名
             if any(filename.lower().endswith(ext) for ext in exts):
-                files.append(os.path.join(root, filename))
+                files.append(os.path.join(root_dir, filename))
     return files
 
 
@@ -77,13 +93,11 @@ def remove_header_footer(doc):
 
 def add_custom_header(doc):
     """为文档所有节添加自定义页眉（学为人师，行为世范），距离顶端0.7cm，避免重复"""
-    from docx.shared import Cm  # 确保导入厘米单位类（若已导入可忽略）
-
     for section in doc.sections:
-        # 1. 设置页眉距离顶端 0.7cm（核心新增）
-        section.header_distance = Cm(0.7)  # 直接用厘米单位，无需手动换算
+        # 1. 设置页眉距离顶端 0.7cm
+        section.header_distance = Cm(0.7)
 
-        # 2. 强制清空当前节页眉（去重逻辑，保留）
+        # 2. 强制清空当前节页眉（去重逻辑）
         header = section.header
         for para in reversed(header.paragraphs):
             p_element = para._element
@@ -93,10 +107,10 @@ def add_custom_header(doc):
             para._p = None
             para._element = None
 
-        # 3. 添加新页眉内容（原有逻辑不变）
+        # 3. 添加新页眉内容
         para = header.add_paragraph()
         para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        run = para.add_run("学为人师，行为世范")
+        run = para.add_run("泉尚优学：学为人师，行为世范！")
         run.font.name = "华文行楷"
         run._element.rPr.rFonts.set(qn('w:eastAsia'), "华文行楷")
         run.font.size = Pt(12)
@@ -104,13 +118,11 @@ def add_custom_header(doc):
 
 def add_centered_page_number(doc):
     """为文档所有节添加居中页码（第X页/共Y页），距离底端1cm，避免重复"""
-    from docx.shared import Cm  # 确保导入厘米单位类（若已导入可忽略）
-
     for section in doc.sections:
-        # 1. 设置页脚距离底端 1cm（核心新增）
+        # 1. 设置页脚距离底端 1cm
         section.footer_distance = Cm(1.0)
 
-        # 2. 强制清空当前节页脚（去重逻辑，保留）
+        # 2. 强制清空当前节页脚（去重逻辑）
         footer = section.footer
         for para in reversed(footer.paragraphs):
             p_element = para._element
@@ -120,7 +132,7 @@ def add_centered_page_number(doc):
             para._p = None
             para._element = None
 
-        # 3. 原有添加页码的完整逻辑（保持不变）
+        # 3. 添加页码内容
         p = footer.add_paragraph()
         para_format = p.paragraph_format
         para_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -174,9 +186,10 @@ def add_centered_page_number(doc):
         run._element.rPr.rFonts.set(qn('w:eastAsia'), "宋体")
         run.font.size = Pt(12)
 
+
 def replace_patterns_in_paragraph(paragraph):
     """
-    替换段落中符合特定模式的文本（中英文括号内的特定数字模式）
+    替换段落中符合特定模式的文本（复用全局编译的正则，提升速度）
     :param paragraph: 需要处理的段落对象
     """
     text_runs = []  # 存储段落中所有文本片段（包含run对象、文本内容及位置）
@@ -196,9 +209,6 @@ def replace_patterns_in_paragraph(paragraph):
 
     # 合并所有文本用于匹配
     all_text = ''.join([t[1] for t in text_runs])
-    # 定义需要匹配的模式（中英文括号内的特定数字模式）
-    english_pattern = r'\(([12][0-9]).{3,}?\)'
-    chinese_pattern = r'（([12][0-9]).{3,}?）'
     replaced_ranges = []  # 存储需要替换的文本范围
 
     # 标记需要替换的范围
@@ -206,9 +216,10 @@ def replace_patterns_in_paragraph(paragraph):
         replaced_ranges.append((match.start(), match.end()))
         return ""  # 替换为空
 
-    # 执行匹配并标记
+    # 执行匹配并标记（复用全局正则，无需重复编译）
     re.sub(chinese_pattern, mark_replaced, all_text)
     re.sub(english_pattern, mark_replaced, all_text)
+    re.sub(k_pattern, mark_replaced, all_text)
 
     # 创建保留标记（True表示保留，False表示删除）
     keep_mask = [True] * len(all_text)
@@ -227,55 +238,24 @@ def replace_patterns_in_paragraph(paragraph):
         run.text = ''.join(kept_chars)  # 更新run的文本
 
 
-import re
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
-
-
 def set_outline_level(doc):
     """
-    将文档中符合特定格式的段落大纲级别设置为1级，规则如下：
-    - 题型+数字/中文数字：段落开头匹配即可
-    - 知识点+数字/中文数字：段落开头匹配即可
-    - 考点+数字：段落开头匹配即可
-    - A/B/C开头的特定模式：段落中仅包含该文本（允许前后有空格、换行等空白字符）
-    - 第X章：段落开头匹配即可
-    - 第X单元：段落开头匹配即可
-    :param doc: 文档对象
+    将文档中符合特定格式的段落大纲级别设置为1级
     """
-    # 定义中文数字（扩展常用范围，支持组合数字）
+    # 定义中文数字（扩展常用范围）
     chinese_nums = r'(?:一|二|三|四|五|六|七|八|九|十|十一|十二|十三|十四|十五|十六|十七|十八|十九|二十|廿|卅|卌|百|千|万|廿一|廿二|卅一|卅二|卌一|卌二)'
 
     # 组合所有匹配模式
     pattern = (
-        # 原题型模式：段落开头为"题型+数字/中文数字"，后续可接任意内容
-        r'题型(?:\d+|' + chinese_nums + r').*'
-
-        # 知识点模式（数字或中文数字）：段落开头为"知识点+数字/中文数字"
-        r'|'
-        r'知识点(?:\d+|' + chinese_nums + r').*'
-
-        # 考点模式（数字）：段落开头为"考点+数字"
-        r'|'
-        r'考点\d+.*'
-
-        # A/B/C开头的特定模式：允许前后有空格等空白字符，核心文本必须是这三个之一
-        r'|'
-        r'^\s*(?:A夯实基础|B能力提升|C综合素养)\s*$'  # \s*匹配任意数量空白字符
-
-        # 新增：第X章模式：段落开头为"第+数字/中文数字+章"
-        r'|'
-        r'第(?:\d+|' + chinese_nums + r')章.*'
-
-        # 新增：第X单元模式：段落开头为"第+数字/中文数字+单元"
-        r'|'
-        r'第(?:\d+|' + chinese_nums + r')单元.*'
+        r'^\s*('
+        r'(题型|考点|考法)(?:\d+|' + chinese_nums + r').*'
+        r'|(?:A夯实基础|B能力提升|C综合素养)\s*$'
+        r'|第(?:\d+|' + chinese_nums + r')(章|单元).*'
+        r')'
     )
 
     for para in doc.paragraphs:
-        # 清除段落首尾的空白字符（这里主要是为了统一处理，不影响A/B/C的匹配）
         clean_text = para.text.strip()
-        # 检查是否完全匹配模式（fullmatch确保整个段落符合规则）
         if re.search(pattern, clean_text):
             # 获取或创建段落属性元素
             p_pr = para._element.get_or_add_pPr()
@@ -286,6 +266,7 @@ def set_outline_level(doc):
             outline_level = OxmlElement('w:outlineLvl')
             outline_level.set(qn('w:val'), '0')
             p_pr.append(outline_level)
+
 
 def process_word_file(file_path, keep_backup):
     """
@@ -327,9 +308,125 @@ def process_word_file(file_path, keep_backup):
 
         # 保存修改
         doc.save(file_path)
-        return True, file_path
+        return True, f"成功：{os.path.basename(file_path)}"
     except Exception as e:
-        return False, f"处理失败：{os.path.basename(file_path)}，错误：{str(e)}"
+        return False, f"失败：{os.path.basename(file_path)} - {str(e)}"
+
+
+# ------------------------------
+# 并行处理核心逻辑
+# ------------------------------
+def process_single_file(file_path, keep_backup):
+    """单个文件的处理逻辑（线程池执行单元，线程安全）"""
+    global processed_count, success_count, error_list
+    filename = os.path.basename(file_path)
+    try:
+        # 执行文件处理
+        res, msg = process_word_file(file_path, keep_backup)
+        # 线程安全更新统计数据（用锁避免并发冲突）
+        with progress_lock:
+            processed_count += 1
+            if res:
+                success_count += 1
+            else:
+                error_list.append(msg)
+        # 实时更新UI进度（通过主线程after方法，确保UI安全）
+        root.after(0, lambda: status_var.set(
+            f"并行处理中 ({processed_count}/{total_files})：当前处理 {filename}"
+        ))
+    except Exception as e:
+        # 捕获未知错误
+        with progress_lock:
+            processed_count += 1
+            error_list.append(f"失败：{filename} - 未知错误：{str(e)}")
+        root.after(0, lambda: status_var.set(
+            f"并行处理中 ({processed_count}/{total_files})：{filename} 处理失败"
+        ))
+
+
+def finish_process(keep_backup):
+    """所有文件处理完成后，显示结果并恢复UI"""
+    global processed_count, success_count, error_list
+    result = f"并行处理完成！\n成功：{success_count}/{processed_count}\n"
+    if keep_backup:
+        result += "原文件已备份为.bak格式，处理后的文件已替换原文件"
+    else:
+        result += "已直接替换原文件（未保留备份）"
+
+    if error_list:
+        result += f"\n\n错误列表（前5条）：\n" + "\n".join(error_list[:5])
+    messagebox.showinfo("并行处理结果", result)
+    # 恢复按钮和状态
+    process_btn.config(state=tk.NORMAL)
+    status_var.set("就绪")
+    # 重置全局进度统计
+    with progress_lock:
+        processed_count = 0
+        success_count = 0
+        error_list = []
+
+
+def start_parallel_process():
+    """启动线程池并行处理（子线程中执行，不阻塞UI）"""
+    global total_files
+    folder_path = folder_var.get().replace("已选择：", "")
+    keep_backup = options['keep_backup'].get()
+    word_files = get_all_files_by_ext(folder_path, ['.docx'])
+    total_files = len(word_files)
+
+    # 配置线程池大小：IO密集型任务最优为 CPU核心数*2，最多10个线程避免资源占用过高
+    max_workers = min(10, total_files)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 批量提交任务（每个文件一个任务）
+        executor.map(
+            process_single_file,  # 任务执行函数
+            word_files,           # 第一个参数：文件路径列表
+            [keep_backup] * total_files  # 第二个参数：是否保留备份（每个任务相同）
+        )
+
+    # 所有任务完成后，调用收尾函数
+    root.after(0, lambda: finish_process(keep_backup))
+
+
+def process_word_files_action():
+    """处理Word文件的入口函数（启动子线程，避免阻塞UI）"""
+    global processed_count, success_count, error_list
+    # 重置全局进度统计
+    with progress_lock:
+        processed_count = 0
+        success_count = 0
+        error_list = []
+
+    folder_path = folder_var.get().replace("已选择：", "")
+    if not folder_path or folder_path == "等待选择文件夹...":
+        messagebox.showwarning("警告", "请先选择文件夹")
+        return
+
+    # 检查是否选择了至少一个处理选项
+    if not any([
+        options['remove_header_footer'].get(),
+        options['add_custom_header'].get(),
+        options['add_page_number'].get(),
+        options['replace_patterns'].get(),
+        options['set_question_outline'].get()
+    ]):
+        if not messagebox.askyesno("提示", "未选择任何处理选项，是否继续？"):
+            return
+
+    word_files = get_all_files_by_ext(folder_path, ['.docx'])
+    total = len(word_files)
+    if total == 0:
+        messagebox.showinfo("提示", "未找到任何.docx文件")
+        return
+
+    # 禁用按钮+更新状态
+    process_btn.config(state=tk.DISABLED)
+    status_var.set(f"准备并行处理 {total} 个文件...")
+    root.update_idletasks()
+
+    # 启动子线程执行并行处理（守护线程，避免程序退出残留）
+    thread = threading.Thread(target=start_parallel_process, daemon=True)
+    thread.start()
 
 
 # ------------------------------
@@ -337,10 +434,7 @@ def process_word_file(file_path, keep_backup):
 # ------------------------------
 def batch_convert_doc_to_docx(root_dir, keep_source, status_var):
     """
-    批量将doc文件转换为docx文件
-    :param root_dir: 根目录
-    :param keep_source: 是否保留源文件
-    :param status_var: 状态变量（用于更新UI）
+    批量将doc文件转换为docx文件（线程中执行，不阻塞UI）
     """
     root_dir = os.path.normpath(root_dir)
     word = win32com.client.Dispatch("Word.Application")
@@ -359,7 +453,6 @@ def batch_convert_doc_to_docx(root_dir, keep_source, status_var):
     for foldername, _, filenames in os.walk(root_dir):
         for filename in filenames:
             lower_name = filename.lower()
-            # 匹配.doc但不匹配.docx（避免重复）
             if lower_name.endswith(".doc") and not lower_name.endswith(".docx"):
                 doc_files.append(os.path.join(foldername, filename))
     total = len(doc_files)
@@ -367,8 +460,8 @@ def batch_convert_doc_to_docx(root_dir, keep_source, status_var):
     # 开始转换
     for i, doc_path in enumerate(doc_files):
         filename = os.path.basename(doc_path)
-        status_var.set(f"正在转换DOC→DOCX ({i + 1}/{total})：{filename}")
-        root.update_idletasks()  # 更新UI
+        root.after(0, lambda: status_var.set(f"正在转换DOC→DOCX ({i + 1}/{total})：{filename}"))
+        root.update_idletasks()
 
         # 构建目标docx路径
         docx_name = f"{os.path.splitext(filename)[0]}.docx"
@@ -378,12 +471,10 @@ def batch_convert_doc_to_docx(root_dir, keep_source, status_var):
         if not os.path.exists(docx_path):
             try:
                 doc = word.Documents.Open(os.path.abspath(doc_path))
-                # 12对应docx格式
-                doc.SaveAs2(os.path.abspath(docx_path), FileFormat=12)
+                doc.SaveAs2(os.path.abspath(docx_path), FileFormat=12)  # 12对应docx格式
                 doc.Close()
                 converted += 1
             except Exception as e:
-                # 记录错误信息（简化错误描述）
                 error_details.append(f"转换失败：{filename} - {str(e).split(',')[0]}")
                 continue
         else:
@@ -410,20 +501,31 @@ def batch_convert_doc_to_docx(root_dir, keep_source, status_var):
         result_msg += "已保留所有源文件\n"
 
     if error_details:
-        result_msg += "\n错误详情：\n" + "\n".join(error_details[:5])  # 只显示前5个错误
-    messagebox.showinfo("DOC转DOCX结果", result_msg)
-    status_var.set("就绪")
+        result_msg += "\n错误详情（前5条）：\n" + "\n".join(error_details[:5])
+    root.after(0, lambda: messagebox.showinfo("DOC转DOCX结果", result_msg))
+    root.after(0, lambda: status_var.set("就绪"))
+
+
+def convert_doc_action():
+    """触发DOC转DOCX功能（启动子线程）"""
+    folder = folder_var.get().replace("已选择：", "")
+    if not folder or folder == "等待选择文件夹...":
+        messagebox.showwarning("警告", "请先选择文件夹")
+        return
+    # 禁用按钮
+    convert_doc_btn.config(state=tk.DISABLED)
+    # 子线程执行转换
+    def worker():
+        batch_convert_doc_to_docx(folder, options['keep_source_doc'].get(), status_var)
+        root.after(0, lambda: convert_doc_btn.config(state=tk.NORMAL))
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def batch_convert_docx_to_pdf(root_dir, use_separate_folder, status_var):
     """
-    批量将docx文件转换为pdf文件（改用Word原生接口，保留大纲/目录/书签）
-    :param root_dir: 根目录
-    :param use_separate_folder: 是否使用单独文件夹保存
-    :param status_var: 状态变量（用于更新UI）
+    批量将docx文件转换为pdf文件（Word原生接口，保留大纲/目录）
     """
     root_dir = os.path.normpath(root_dir)
-    # 初始化Word应用（隐藏窗口，禁用提示）
     word = win32com.client.Dispatch("Word.Application")
     word.Visible = False
     word.DisplayAlerts = 0
@@ -435,9 +537,9 @@ def batch_convert_docx_to_pdf(root_dir, use_separate_folder, status_var):
     fail = 0  # 失败数
     error_details = []  # 错误详情
 
-    # 重要：定义文件覆盖确认的全局变量（原代码逻辑）
-    apply_to_all = False  # 是否对所有文件应用相同选择
-    global_decision = None  # 全局选择（替换/跳过）
+    # 全局变量（文件覆盖确认）
+    apply_to_all = False
+    global_decision = None
 
     # 获取所有docx文件（排除临时文件）
     docx_files = get_all_files_by_ext(root_dir, ['.docx'])
@@ -446,66 +548,59 @@ def batch_convert_docx_to_pdf(root_dir, use_separate_folder, status_var):
     # 开始转换
     for i, docx_path in enumerate(docx_files):
         filename = os.path.basename(docx_path)
-        status_var.set(f"正在转换DOCX→PDF ({i + 1}/{total})：{filename}")
-        root.update_idletasks()  # 更新UI
+        root.after(0, lambda: status_var.set(f"正在转换DOCX→PDF ({i + 1}/{total})：{filename}"))
+        root.update_idletasks()
 
         # 构建目标PDF路径
         if use_separate_folder:
-            # 保持相对路径结构
             relative_path = os.path.relpath(docx_path, root_dir)
             pdf_path = os.path.join(root_dir, "docx2pdf", f"{os.path.splitext(relative_path)[0]}.pdf")
-            os.makedirs(os.path.dirname(pdf_path), exist_ok=True)  # 创建父目录
+            os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
         else:
-            # 保存到原位置
             pdf_path = f"{os.path.splitext(docx_path)[0]}.pdf"
 
         # 处理目标文件已存在的情况
         if os.path.exists(pdf_path):
             if apply_to_all:
-                # 应用全局选择
                 if not global_decision:
                     skipped += 1
                     continue
             else:
-                # 弹出对话框询问用户（原代码的回调逻辑）
-                dialog = tk.Toplevel()
+                # 弹出对话框询问用户
+                dialog = tk.Toplevel(root)
                 dialog.title("文件已存在")
                 dialog.geometry("400x150")
-                dialog.transient(root)  # 设置为主窗口的子窗口
-                dialog.grab_set()  # 模态窗口
+                dialog.transient(root)
+                dialog.grab_set()
 
                 ttk.Label(dialog, text=f"文件 '{os.path.basename(pdf_path)}' 已存在，是否替换？").pack(pady=10, padx=10)
 
                 apply_var = tk.BooleanVar(value=False)
                 ttk.Checkbutton(dialog, text="对后续所有文件应用此选择", variable=apply_var).pack(anchor=tk.W, padx=20)
 
-                decision = None  # 用户选择
+                decision = None
 
-                # 替换按钮回调（保留原逻辑）
                 def on_replace():
                     nonlocal decision
                     decision = True
                     dialog.destroy()
 
-                # 跳过按钮回调（保留原逻辑）
                 def on_skip():
                     nonlocal decision
                     decision = False
                     dialog.destroy()
 
-                # 按钮布局（保留原UI）
                 btn_frame = ttk.Frame(dialog)
                 btn_frame.pack(pady=15)
                 ttk.Button(btn_frame, text="替换", command=on_replace).pack(side=tk.LEFT, padx=5)
                 ttk.Button(btn_frame, text="跳过", command=on_skip).pack(side=tk.LEFT, padx=5)
 
-                dialog.wait_window()  # 等待对话框关闭
+                dialog.wait_window()
 
                 if decision is None:
                     skipped += 1
                     continue
 
-                # 应用全局选择（保留原逻辑）
                 if apply_var.get():
                     apply_to_all = True
                     global_decision = decision
@@ -514,21 +609,18 @@ def batch_convert_docx_to_pdf(root_dir, use_separate_folder, status_var):
                     skipped += 1
                     continue
 
-        # 核心：用Word原生接口转换（保留大纲/目录）
+        # 核心：用Word原生接口转换
         try:
-            # 打开docx文件（只读模式避免锁定）
             doc = word.Documents.Open(os.path.abspath(docx_path), ReadOnly=True)
-            # 17 = Word的PDF格式常量，CreateBookmarks=1保留大纲书签
             doc.ExportAsFixedFormat(
                 OutputFileName=os.path.abspath(pdf_path),
                 ExportFormat=17,  # 17对应PDF格式
                 IncludeDocProps=True,
-                CreateBookmarks=1,  # 1=基于标题创建书签（对应大纲级别）
-                DocStructureTags=True  # 保留文档结构（支持PDF目录导航）
+                CreateBookmarks=1,  # 保留大纲书签
+                DocStructureTags=True  # 保留文档结构
             )
-            doc.Close(SaveChanges=0)  # 关闭文件，不保存修改
+            doc.Close(SaveChanges=0)
             success += 1
-            # 统计替换数（保留原逻辑）
             if os.path.exists(pdf_path) and (apply_to_all and global_decision or not apply_to_all):
                 replaced += 1
         except Exception as e:
@@ -536,10 +628,9 @@ def batch_convert_docx_to_pdf(root_dir, use_separate_folder, status_var):
             fail += 1
             continue
 
-    # 关闭Word应用
     word.Quit()
 
-    # 构建结果消息（沿用原有格式）
+    # 构建结果消息
     result_msg = (f"转换完成！\n总文件：{total}\n"
                   f"成功转换：{success - replaced} | 替换现有：{replaced} | 跳过：{skipped} | 失败：{fail}\n")
     if use_separate_folder:
@@ -548,20 +639,35 @@ def batch_convert_docx_to_pdf(root_dir, use_separate_folder, status_var):
         result_msg += "PDF文件保存于原docx文件位置"
 
     if error_details:
-        result_msg += f"\n\n错误详情：\n" + "\n".join(error_details[:5])  # 只显示前5个错误
-    messagebox.showinfo("DOCX转PDF结果", result_msg)
-    status_var.set("就绪")
+        result_msg += f"\n\n错误详情（前5条）：\n" + "\n".join(error_details[:5])
+    root.after(0, lambda: messagebox.showinfo("DOCX转PDF结果", result_msg))
+    root.after(0, lambda: status_var.set("就绪"))
+
+
+def convert_pdf_action():
+    """触发DOCX转PDF功能（启动子线程）"""
+    folder = folder_var.get().replace("已选择：", "")
+    if not folder or folder == "等待选择文件夹...":
+        messagebox.showwarning("警告", "请先选择文件夹")
+        return
+    # 禁用按钮
+    convert_pdf_btn.config(state=tk.DISABLED)
+    # 子线程执行转换
+    def worker():
+        batch_convert_docx_to_pdf(folder, options['docx2pdf_separate_folder'].get(), status_var)
+        root.after(0, lambda: convert_pdf_btn.config(state=tk.NORMAL))
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # ------------------------------
 # 主界面
 # ------------------------------
 def main():
-    global options, root
+    global options, root, process_btn, status_var, folder_var, convert_doc_btn, convert_pdf_btn
     root = tk.Tk()
-    root.title("Word文件处理工具")
-    root.geometry("700x800")  # 调整高度
-    root.resizable(False, False)  # 禁止调整窗口大小
+    root.title("Word文件处理工具（并行优化版）")
+    root.geometry("700x800")
+    root.resizable(False, False)
 
     # 变量定义
     folder_var = tk.StringVar(value="等待选择文件夹...")
@@ -571,12 +677,13 @@ def main():
         'add_custom_header': tk.BooleanVar(value=True),
         'add_page_number': tk.BooleanVar(value=True),
         'replace_patterns': tk.BooleanVar(value=True),
-        'set_question_outline': tk.BooleanVar(value=True),  # 新增：设置题型段落大纲级别
+        'set_question_outline': tk.BooleanVar(value=True),
         'keep_backup': tk.BooleanVar(value=False),
         # 辅助功能选项
         'keep_source_doc': tk.BooleanVar(value=False),
         'docx2pdf_separate_folder': tk.BooleanVar(value=False)
     }
+    status_var = tk.StringVar(value="就绪")
 
     # 主框架
     main_frame = ttk.Frame(root, padding=15)
@@ -598,7 +705,7 @@ def main():
     # 主功能区：Word处理
     # ------------------------------
     ttk.Separator(main_frame, orient="horizontal").pack(fill=tk.X, pady=10)
-    ttk.Label(main_frame, text="【主功能区：Word文件处理】", font=("Arial", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+    ttk.Label(main_frame, text="【主功能区：Word文件并行处理】", font=("Arial", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
 
     # 处理内容选项
     ttk.Label(main_frame, text="处理内容选项:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
@@ -610,7 +717,6 @@ def main():
     col1.pack(side=tk.LEFT, fill=tk.X, expand=True)
     ttk.Checkbutton(col1, text="删除页眉页脚", variable=options['remove_header_footer']).pack(anchor=tk.W, pady=2)
     ttk.Checkbutton(col1, text="添加自定义页眉", variable=options['add_custom_header']).pack(anchor=tk.W, pady=2)
-    # 替换为设置大纲级别选项
     ttk.Checkbutton(
         col1,
         text="将题型、知识点、考点等段落大纲级别设置为1级",
@@ -627,7 +733,7 @@ def main():
     ).pack(anchor=tk.W, pady=2)
     ttk.Checkbutton(
         col2,
-        text="替换指定文本模式",
+        text="替换指定文本模式（中英文括号/中括号）",
         variable=options['replace_patterns']
     ).pack(anchor=tk.W, pady=2)
 
@@ -639,57 +745,12 @@ def main():
         variable=options['keep_backup']
     ).pack(anchor=tk.W, pady=(0, 15))
 
-    # 状态显示区（所有功能共用）
-    status_var = tk.StringVar(value="就绪")
+    # 状态显示区
     ttk.Label(main_frame, textvariable=status_var, wraplength=650).pack(anchor=tk.W, pady=(0, 10))
 
-    def process_word_files_action():
-        """处理Word文件的入口函数"""
-        folder_path = folder_var.get().replace("已选择：", "")
-        if not folder_path or folder_path == "等待选择文件夹...":
-            messagebox.showwarning("警告", "请先选择文件夹")
-            return
-
-        # 检查是否选择了至少一个处理选项
-        if not any([
-            options['remove_header_footer'].get(),
-            options['add_custom_header'].get(),
-            options['add_page_number'].get(),
-            options['replace_patterns'].get(),
-            options['set_question_outline'].get()  # 更新选项
-        ]):
-            if not messagebox.askyesno("提示", "未选择任何处理选项，是否继续？"):
-                return
-
-        keep_backup = options['keep_backup'].get()
-        word_files = get_all_files_by_ext(folder_path, ['.docx'])
-        total = len(word_files)
-        success = 0
-        errors = []
-
-        # 批量处理文件
-        for i, file_path in enumerate(word_files):
-            status_var.set(f"正在处理Word文件 ({i + 1}/{total})：{os.path.basename(file_path)}")
-            root.update_idletasks()
-            res, msg = process_word_file(file_path, keep_backup)
-            if res:
-                success += 1
-            else:
-                errors.append(msg)
-
-        # 构建结果消息
-        result = f"处理完成！成功：{success}/{total}\n"
-        if keep_backup:
-            result += "原文件已备份为.bak格式，处理后的文件已替换原文件"
-        else:
-            result += "已直接替换原文件（未保留备份）"
-
-        if errors:
-            result += f"\n\n错误列表：\n" + "\n".join(errors[:5])  # 只显示前5个错误
-        messagebox.showinfo("处理结果", result)
-        status_var.set("就绪")
-
-    ttk.Button(main_frame, text="开始处理Word文件", command=process_word_files_action).pack(pady=(0, 15))
+    # 处理按钮（全局变量，用于禁用/启用）
+    process_btn = ttk.Button(main_frame, text="开始并行处理Word文件", command=process_word_files_action)
+    process_btn.pack(pady=(0, 15))
 
     # ------------------------------
     # 辅助功能区：格式转换
@@ -705,15 +766,8 @@ def main():
         variable=options['keep_source_doc']
     ).pack(anchor=tk.W, pady=(0, 5))
 
-    def convert_doc_action():
-        """触发DOC转DOCX功能"""
-        folder = folder_var.get().replace("已选择：", "")
-        if not folder or folder == "等待选择文件夹...":
-            messagebox.showwarning("警告", "请先选择文件夹")
-            return
-        batch_convert_doc_to_docx(folder, options['keep_source_doc'].get(), status_var)
-
-    ttk.Button(main_frame, text="批量转换DOC→DOCX", command=convert_doc_action).pack(pady=(0, 10))
+    convert_doc_btn = ttk.Button(main_frame, text="批量转换DOC→DOCX", command=convert_doc_action)
+    convert_doc_btn.pack(pady=(0, 10))
 
     # DOCX转PDF
     ttk.Label(main_frame, text="DOCX转PDF选项:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
@@ -723,15 +777,8 @@ def main():
         variable=options['docx2pdf_separate_folder']
     ).pack(anchor=tk.W, pady=(0, 5))
 
-    def convert_pdf_action():
-        """触发DOCX转PDF功能"""
-        folder = folder_var.get().replace("已选择：", "")
-        if not folder or folder == "等待选择文件夹...":
-            messagebox.showwarning("警告", "请先选择文件夹")
-            return
-        batch_convert_docx_to_pdf(folder, options['docx2pdf_separate_folder'].get(), status_var)
-
-    ttk.Button(main_frame, text="批量转换DOCX→PDF", command=convert_pdf_action).pack(pady=(0, 10))
+    convert_pdf_btn = ttk.Button(main_frame, text="批量转换DOCX→PDF", command=convert_pdf_action)
+    convert_pdf_btn.pack(pady=(0, 10))
 
     # 退出按钮
     ttk.Button(main_frame, text="退出", command=lambda: [root.destroy(), os._exit(0)]).pack(pady=15)
