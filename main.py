@@ -115,7 +115,7 @@ def add_custom_header(doc):
         # 3. 添加新页眉内容
         para = header.add_paragraph()
         para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        para.paragraph_format.left_indent = Cm(2) - section.left_margin
+        para.paragraph_format.left_indent = Cm(1.5) - section.left_margin
         run = para.add_run("泉尚优学：学为人师，行为世范！")
         run.font.name = "华文行楷"
         run._element.rPr.rFonts.set(qn('w:eastAsia'), "华文行楷")
@@ -253,11 +253,9 @@ def set_outline_level(doc):
 
     # 组合所有匹配模式
     pattern = (
-            r'^\s*('
             r'(题型|考点|考法)(?:\d+|' + chinese_nums + r').*'
-            r'|(?:A夯实基础|B能力提升|C综合素养)\s*$'
+            r'|^\s*(?:A夯实基础|B能力提升|C综合素养)\s*$'
             r'|第(?:\d+|' + chinese_nums + r')(章|单元).*'
-            r')'
     )
 
     for para in doc.paragraphs:
@@ -450,7 +448,7 @@ def show_convert_result(convert_type, total, extra_params):
     result_msg = f"{convert_type} 并行处理完成！\n总文件：{total}\n成功转换：{success_count}\n"
 
     # 统计跳过数（排除真正的错误）
-    skipped_count = total - success_count - len([e for e in error_list if "跳过" not in e])
+    skipped_count = len([e for e in error_list if "跳过" in e])
     result_msg += f"跳过（已存在/无需处理）：{skipped_count}\n"
 
     # 根据转换类型补充信息
@@ -476,7 +474,7 @@ def show_convert_result(convert_type, total, extra_params):
 
 
 def parallel_convert_doc_to_docx(root_dir, keep_source, status_var):
-    """并行批量将doc文件转换为docx文件（替换原 batch_convert_doc_to_docx 函数）"""
+    """并行批量将doc文件转换为docx文件"""
     global processed_count, success_count, error_list
     # 重置统计变量（线程安全）
     with progress_lock:
@@ -525,17 +523,15 @@ def parallel_convert_doc_to_docx(root_dir, keep_source, status_var):
 
                 success_flag = False
                 error_msg = ""
-                # 目标文件不存在才转换
-                if not os.path.exists(docx_path):
-                    try:
-                        doc = word.Documents.Open(os.path.abspath(doc_path))
-                        doc.SaveAs2(os.path.abspath(docx_path), FileFormat=12)  # 12=docx格式
-                        doc.Close()
-                        success_flag = True
-                    except Exception as e:
-                        error_msg = f"转换失败：{str(e).split(',')[0]}"
-                else:
-                    error_msg = "跳过：目标docx已存在"
+                # 无论目标文件是否存在，都执行转换（已存在则覆盖）
+                try:
+                    doc = word.Documents.Open(os.path.abspath(doc_path))
+                    doc.SaveAs2(os.path.abspath(docx_path), FileFormat=12)  # 12=docx格式，已存在自动覆盖
+                    doc.Close()
+                    success_flag = True
+                    error_msg = "转换成功（已覆盖现有文件）"
+                except Exception as e:
+                    error_msg = f"转换失败：{str(e).split(',')[0]}"
 
                 # 线程安全更新统计数据
                 with progress_lock:
@@ -615,23 +611,21 @@ def parallel_convert_docx_to_pdf(root_dir, use_separate_folder, status_var):
 
                 success_flag = False
                 error_msg = ""
-                # 处理目标文件已存在的情况（单线程内询问，避免多线程弹窗冲突）
-                if os.path.exists(pdf_path):
-                    error_msg = "跳过：目标PDF已存在"
-                else:
-                    try:
-                        doc = word.Documents.Open(os.path.abspath(docx_path), ReadOnly=True)
-                        doc.ExportAsFixedFormat(
-                            OutputFileName=os.path.abspath(pdf_path),
-                            ExportFormat=17,  # 17=PDF格式
-                            IncludeDocProps=True,
-                            CreateBookmarks=1,  # 保留大纲书签
-                            DocStructureTags=True
-                        )
-                        doc.Close(SaveChanges=0)
-                        success_flag = True
-                    except Exception as e:
-                        error_msg = f"转换失败：{str(e)}"
+                # 无论目标文件是否存在，都执行转换（已存在则覆盖）
+                try:
+                    doc = word.Documents.Open(os.path.abspath(docx_path), ReadOnly=True)
+                    doc.ExportAsFixedFormat(
+                        OutputFileName=os.path.abspath(pdf_path),
+                        ExportFormat=17,  # 17=PDF格式
+                        IncludeDocProps=True,
+                        CreateBookmarks=1,  # 保留大纲书签
+                        DocStructureTags=True
+                    )
+                    doc.Close(SaveChanges=0)
+                    success_flag = True
+                    error_msg = "转换成功（已覆盖现有文件）"
+                except Exception as e:
+                    error_msg = f"转换失败：{str(e)}"
 
                 # 线程安全更新统计数据
                 with progress_lock:
