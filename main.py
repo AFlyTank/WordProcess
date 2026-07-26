@@ -8,7 +8,8 @@ from docx import Document  # 用于docx文档基本操作
 from docx.enum.text import WD_ALIGN_PARAGRAPH  # 用于段落对齐设置
 from docx.oxml import OxmlElement  # 用于操作XML元素
 from docx.oxml.ns import qn  # 用于设置XML命名空间
-from docx.shared import Pt, Cm  # 用于设置字体大小和厘米单位
+from docx.shared import Pt, Cm
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 import concurrent.futures  # 用于线程池并行处理
 import threading  # 用于线程锁和线程管理
 
@@ -19,7 +20,7 @@ import threading  # 用于线程锁和线程管理
 english_pattern = re.compile(r'\(([012]\d)[^()]*?[\u4e00-\u9fa5][^()]{0,10}\)')  # 英文小括号
 chinese_pattern = re.compile(r'（([012]\d)[^（）]*?[\u4e00-\u9fa5][^（）]{0,10}）')  # 中文小括号
 k_pattern = re.compile(r'\[([012]\d)[^\]]*?[\u4e00-\u9fa5][^\]]{0,10}\]')  # 英文中括号
-
+#k_pattern = re.compile(r'（[^）]*公众号[^）]*）')#这里可以写自己希望批量处理替换掉的正则
 # 并行处理进度统计（线程安全）
 progress_lock = threading.Lock()
 processed_count = 0  # 已处理文件数
@@ -63,6 +64,32 @@ def get_all_files_by_ext(folder_path, exts):
             if any(filename.lower().endswith(ext) for ext in exts):
                 files.append(os.path.join(root_dir, filename))
     return files
+
+
+# ------------------------------
+# 【新增】统一段落行距、段前段后设置
+# ------------------------------
+def set_all_paragraph_spacing(doc):
+    """
+    所有段落设置：单倍行距，段前1行，段后1行
+    包含正文段落 + 表格内单元格段落
+    """
+    # 处理正文段落
+    for para in doc.paragraphs:
+        pf = para.paragraph_format
+        pf.line_spacing_rule = 0  # 0 = 单倍行距
+        pf.space_before = Pt(0)  # 1行（Word默认12磅≈1行）
+        pf.space_after = Pt(0)
+
+    # 处理表格内所有段落
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    pf = para.paragraph_format
+                    pf.line_spacing_rule = 0
+                    pf.space_before = Pt(0)
+                    pf.space_after = Pt(0)
 
 
 # ------------------------------
@@ -319,10 +346,10 @@ def process_word_file(file_path, keep_backup):
         # 根据选项执行操作
         if options['remove_header_footer'].get():
             remove_header_footer(doc)
-        if options['add_page_number'].get():
-            add_centered_page_number(doc)
         if options['add_custom_header'].get():
             add_custom_header(doc)
+        if options['add_page_number'].get():
+            add_centered_page_number(doc)
 
         if options['replace_patterns'].get():
             # 处理普通段落
@@ -338,6 +365,10 @@ def process_word_file(file_path, keep_backup):
         # 设置题型段落的大纲级别为1级
         if options['set_question_outline'].get():
             set_outline_level(doc)
+
+        # ==========【新增】统一段落格式判断 ==========
+        if options['uniform_paragraph_spacing'].get():
+            set_all_paragraph_spacing(doc)
 
         # 保存修改
         doc.save(file_path)
@@ -441,7 +472,8 @@ def process_word_files_action():
         options['add_custom_header'].get(),
         options['add_page_number'].get(),
         options['replace_patterns'].get(),
-        options['set_question_outline'].get()
+        options['set_question_outline'].get(),
+        options['uniform_paragraph_spacing'].get()
     ]):
         if not messagebox.askyesno("提示", "未选择任何处理选项，是否继续？"):
             return
@@ -732,6 +764,7 @@ def main():
         'add_page_number': tk.BooleanVar(value=True),
         'replace_patterns': tk.BooleanVar(value=True),
         'set_question_outline': tk.BooleanVar(value=True),
+        'uniform_paragraph_spacing': tk.BooleanVar(value=False),  # 新增：默认不勾选
         'keep_backup': tk.BooleanVar(value=False),
         # 辅助功能选项
         'keep_source_doc': tk.BooleanVar(value=False),
@@ -776,6 +809,12 @@ def main():
         col1,
         text="将题型、知识点、考点等段落大纲级别设置为1级",
         variable=options['set_question_outline']
+    ).pack(anchor=tk.W, pady=2)
+    # 新增复选框
+    ttk.Checkbutton(
+        col1,
+        text="统一所有段落：单倍行距，段前1行、段后1行",
+        variable=options['uniform_paragraph_spacing']
     ).pack(anchor=tk.W, pady=2)
 
     # 选项列2
