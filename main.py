@@ -2,7 +2,7 @@ import os
 import re
 import shutil
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, scrolledtext
 import win32com.client  # 用于格式转换
 from docx import Document  # 用于docx文档基本操作
 from docx.enum.text import WD_ALIGN_PARAGRAPH  # 用于段落对齐设置
@@ -14,13 +14,20 @@ import concurrent.futures  # 用于线程池并行处理
 import threading  # 用于线程锁和线程管理
 
 # ------------------------------
-# 全局变量（并行处理+正则缓存）
+# 全局变量（并行处理+正则缓存 + 新增自定义配置全局存储）
 # ------------------------------
 # 正则缓存（全局编译，只解析一次，提升速度）
 english_pattern = re.compile(r'\(([012]\d)[^()]*?[\u4e00-\u9fa5][^()]{0,10}\)')  # 英文小括号
 chinese_pattern = re.compile(r'（([012]\d)[^（）]*?[\u4e00-\u9fa5][^（）]{0,10}）')  # 中文小括号
 k_pattern = re.compile(r'\[([012]\d)[^\]]*?[\u4e00-\u9fa5][^\]]{0,10}\]')  # 英文中括号
-#k_pattern = re.compile(r'（[^）]*公众号[^）]*）')#这里可以写自己希望批量处理替换掉的正则
+
+# ========== 新增：用户自定义配置全局变量 ==========
+user_config = {
+    "header_text": "泉尚优学：学为人师，行为世范！",  # 自定义页眉文本
+    "custom_replace_regex": "",  # 用户自定义替换正则，多行分隔
+    "custom_outline_regex": ""   # 用户自定义大纲一级匹配正则
+}
+
 # 并行处理进度统计（线程安全）
 progress_lock = threading.Lock()
 processed_count = 0  # 已处理文件数
@@ -29,11 +36,69 @@ error_list = []  # 错误列表
 options = {}  # 全局配置选项
 root = None  # 主窗口对象
 process_btn = None  # 处理按钮对象
+detail_setting_btn = None  # 新增：详细设置按钮
 status_var = None  # 状态显示变量
 folder_var = None  # 文件夹路径变量
 convert_doc_btn = None  # DOC转DOCX按钮
 convert_pdf_btn = None  # DOCX转PDF按钮
 total_files = 0  # 并行处理总文件数
+
+
+# ------------------------------
+# 【新增】详细设置弹窗函数
+# ------------------------------
+def open_detail_setting_window():
+    """打开详细设置弹窗，编辑页眉、自定义替换正则、大纲匹配正则"""
+    global user_config
+    # 创建弹窗
+    setting_win = tk.Toplevel(root)
+    setting_win.title("详细设置")
+    setting_win.geometry("680x520")
+    setting_win.resizable(False, False)
+    setting_win.transient(root)  # 置顶依附主窗口
+    setting_win.grab_set()  # 模态弹窗，只能操作此窗口
+
+    main_frame = ttk.Frame(setting_win, padding=15)
+    main_frame.pack(fill=tk.BOTH, expand=True)
+
+    # 1. 页眉文本设置
+    ttk.Label(main_frame, text="1. 自定义页眉文本：", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+    header_entry = ttk.Entry(main_frame, width=90)
+    header_entry.insert(0, user_config["header_text"])
+    header_entry.pack(pady=(0, 12), fill=tk.X)
+
+    # 2. 自定义替换正则（滚动文本框，每行一条正则）
+    ttk.Label(main_frame, text="2. 自定义替换正则（多条请分行填写，匹配内容自动删除）：", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+    replace_text = scrolledtext.ScrolledText(main_frame, width=80, height=6)
+    replace_text.insert("1.0", user_config["custom_replace_regex"])
+    replace_text.pack(pady=(0, 12), fill=tk.BOTH)
+
+    # 3. 自定义大纲一级匹配正则（追加原有规则）
+    ttk.Label(main_frame, text="3. 追加大纲1级匹配正则（多条分行，原有题型规则保留）：", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+    outline_text = scrolledtext.ScrolledText(main_frame, width=80, height=6)
+    outline_text.insert("1.0", user_config["custom_outline_regex"])
+    outline_text.pack(pady=(0, 12), fill=tk.BOTH)
+
+    # 底部按钮区域
+    btn_frame = ttk.Frame(main_frame)
+    btn_frame.pack(pady=(10, 0))
+
+    def save_config():
+        """保存用户填写的配置到全局变量"""
+        global user_config
+        # 读取输入内容
+        new_header = header_entry.get().strip()
+        new_replace_regex = replace_text.get("1.0", tk.END).strip()
+        new_outline_regex = outline_text.get("1.0", tk.END).strip()
+        # 更新全局配置
+        user_config["header_text"] = new_header
+        user_config["custom_replace_regex"] = new_replace_regex
+        user_config["custom_outline_regex"] = new_outline_regex
+        messagebox.showinfo("保存成功", "自定义设置已保存，处理Word时立即生效！")
+        setting_win.destroy()
+
+    ttk.Button(btn_frame, text="保存设置", command=save_config).grid(row=0, column=0, padx=10)
+    ttk.Button(btn_frame, text="取消", command=setting_win.destroy).grid(row=0, column=1, padx=10)
 
 
 # ------------------------------
@@ -93,7 +158,7 @@ def set_all_paragraph_spacing(doc):
 
 
 # ------------------------------
-# 主功能区：Word处理功能
+# 主功能区：Word处理功能（修改多处适配自定义配置）
 # ------------------------------
 def remove_header_footer(doc):
     """删除文档中所有节的页眉页脚内容，并断开节链接"""
@@ -124,7 +189,8 @@ def remove_header_footer(doc):
 
 
 def add_custom_header(doc):
-    """为文档所有节添加自定义页眉，距离顶端0.7cm，避免重复"""
+    """【修改】读取用户自定义页眉文本，为文档所有节添加页眉"""
+    header_text = user_config["header_text"]  # 读取用户自定义页眉
     for section in doc.sections:
         # ========== 新增代码 START ==========
         # 关闭“不同首页页眉页脚”+“不同奇偶页页眉页脚”（核心！）
@@ -154,11 +220,11 @@ def add_custom_header(doc):
             para._p = None
             para._element = None
 
-        # 3. 添加新页眉内容
+        # 3. 添加新页眉内容（使用用户自定义文本）
         para = header.add_paragraph()
         para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
         para.paragraph_format.left_indent = Cm(1.5) - section.left_margin
-        run = para.add_run("泉尚优学：学为人师，行为世范！")
+        run = para.add_run(header_text)
         run.font.name = "华文行楷"
         run._element.rPr.rFonts.set(qn('w:eastAsia'), "华文行楷")
         run.font.size = Pt(12)
@@ -173,7 +239,7 @@ def add_centered_page_number(doc):
         # 移除“不同首页”设置
         if sectPr.find(qn('w:titlePg')) is not None:
             sectPr.remove(sectPr.find(qn('w:titlePg')))
-        # 移除“不同奇偶页”设置
+        # 移除“不同奇偶页页眉页脚”
         if sectPr.find(qn('w:evenAndOddHeaders')) is not None:
             sectPr.remove(sectPr.find(qn('w:evenAndOddHeaders')))
         # 强制所有页面共用页眉区域
@@ -251,7 +317,7 @@ def add_centered_page_number(doc):
 
 def replace_patterns_in_paragraph(paragraph):
     """
-    替换段落中符合特定模式的文本（复用全局编译的正则，提升速度）
+    【修改】增加用户自定义正则匹配替换，原有正则保留，新增用户自定义正则
     :param paragraph: 需要处理的段落对象
     """
     text_runs = []  # 存储段落中所有文本片段（包含run对象、文本内容及位置）
@@ -278,10 +344,23 @@ def replace_patterns_in_paragraph(paragraph):
         replaced_ranges.append((match.start(), match.end()))
         return ""  # 替换为空
 
-    # 执行匹配并标记（复用全局正则，无需重复编译）
+    # 1. 执行内置三条正则匹配
     re.sub(chinese_pattern, mark_replaced, all_text)
     re.sub(english_pattern, mark_replaced, all_text)
     re.sub(k_pattern, mark_replaced, all_text)
+
+    # 2. 新增：读取用户自定义正则，逐行编译执行
+    custom_regex_lines = user_config["custom_replace_regex"].splitlines()
+    for reg_str in custom_regex_lines:
+        reg_str = reg_str.strip()
+        if not reg_str:
+            continue
+        try:
+            custom_pat = re.compile(reg_str)
+            re.sub(custom_pat, mark_replaced, all_text)
+        except re.error:
+            # 正则语法错误自动跳过，不中断程序
+            continue
 
     # 创建保留标记（True表示保留，False表示删除）
     keep_mask = [True] * len(all_text)
@@ -302,30 +381,45 @@ def replace_patterns_in_paragraph(paragraph):
 
 def set_outline_level(doc):
     """
-    将文档中符合特定格式的段落大纲级别设置为1级
+    【修改】内置题型正则 + 用户追加自定义正则，合并匹配设置大纲1级
     """
     # 定义中文数字（扩展常用范围）
     chinese_nums = r'(?:一|二|三|四|五|六|七|八|九|十|十一|十二|十三|十四|十五|十六|十七|十八|十九|二十)'
 
-    # 组合所有匹配模式
-    pattern = (
+    # 内置基础匹配规则
+    base_pattern = (
             r'(题型|考点|考法|知识点|易错点|重难点)(?:\d+|' + chinese_nums + r').*'
             r'|^\s*(?:A夯实基础|B能力提升|C综合素养)\s*$'
             r'|第(?:\d+|' + chinese_nums + r')(章|单元).*'
     )
 
+    # 拼接用户自定义正则规则
+    custom_lines = user_config["custom_outline_regex"].splitlines()
+    custom_rules = []
+    for line in custom_lines:
+        line = line.strip()
+        if line:
+            custom_rules.append(line)
+    # 合并所有正则规则，用 | 分隔
+    all_rules = [base_pattern] + custom_rules
+    full_pattern = "|".join(all_rules)
+
     for para in doc.paragraphs:
         clean_text = para.text.strip()
-        if re.search(pattern, clean_text):
-            # 获取或创建段落属性元素
-            p_pr = para._element.get_or_add_pPr()
-            # 移除已有的大纲级别设置（避免重复）
-            for elem in p_pr.findall(qn('w:outlineLvl')):
-                p_pr.remove(elem)
-            # 创建大纲级别元素并设置为1级（Word中0对应1级）
-            outline_level = OxmlElement('w:outlineLvl')
-            outline_level.set(qn('w:val'), '0')
-            p_pr.append(outline_level)
+        try:
+            if re.search(full_pattern, clean_text):
+                # 获取或创建段落属性元素
+                p_pr = para._element.get_or_add_pPr()
+                # 移除已有的大纲级别设置（避免重复）
+                for elem in p_pr.findall(qn('w:outlineLvl')):
+                    p_pr.remove(elem)
+                # 创建大纲级别元素并设置为1级（Word中0对应1级）
+                outline_level = OxmlElement('w:outlineLvl')
+                outline_level.set(qn('w:val'), '0')
+                p_pr.append(outline_level)
+        except re.error:
+            # 用户正则语法错误，跳过本条段落匹配
+            continue
 
 
 def process_word_file(file_path, keep_backup):
@@ -422,6 +516,7 @@ def finish_process(keep_backup):
     messagebox.showinfo("并行处理结果", result)
     # 恢复按钮和状态
     process_btn.config(state=tk.NORMAL)
+    detail_setting_btn.config(state=tk.NORMAL)  # 恢复详细设置按钮
     status_var.set("就绪")
     # 重置全局进度统计
     with progress_lock:
@@ -486,6 +581,7 @@ def process_word_files_action():
 
     # 禁用按钮+更新状态
     process_btn.config(state=tk.DISABLED)
+    detail_setting_btn.config(state=tk.DISABLED)  # 处理中禁用设置按钮
     status_var.set(f"准备并行处理 {total} 个文件...")
     root.update_idletasks()
 
@@ -746,10 +842,10 @@ def convert_pdf_action():
 
 
 # ------------------------------
-# 主界面
+# 主界面（修改按钮布局，并排新增详细设置按钮）
 # ------------------------------
 def main():
-    global options, root, process_btn, status_var, folder_var, convert_doc_btn, convert_pdf_btn
+    global options, root, process_btn, detail_setting_btn, status_var, folder_var, convert_doc_btn, convert_pdf_btn
     root = tk.Tk()
     root.title("Word文件处理工具（全功能并行版）")
     root.geometry("700x800")
@@ -842,9 +938,15 @@ def main():
     # 状态显示区
     ttk.Label(main_frame, textvariable=status_var, wraplength=650).pack(anchor=tk.W, pady=(0, 10))
 
-    # 处理按钮（全局变量，用于禁用/启用）
-    process_btn = ttk.Button(main_frame, text="开始并行处理Word文件", command=process_word_files_action)
-    process_btn.pack(pady=(0, 15))
+    # ========== 修改：按钮并排布局 开始并行处理 + 详细设置 ==========
+    btn_row_frame = ttk.Frame(main_frame)
+    btn_row_frame.pack(pady=(0, 15))
+    # 主处理按钮
+    process_btn = ttk.Button(btn_row_frame, text="开始并行处理Word文件", command=process_word_files_action)
+    process_btn.grid(row=0, column=0, padx=8)
+    # 新增详细设置按钮
+    detail_setting_btn = ttk.Button(btn_row_frame, text="详细设置", command=open_detail_setting_window)
+    detail_setting_btn.grid(row=0, column=1, padx=8)
 
     # ------------------------------
     # 辅助功能区：格式转换
