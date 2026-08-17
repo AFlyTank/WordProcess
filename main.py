@@ -13,19 +13,19 @@ from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 import concurrent.futures  # 用于线程池并行处理
 import threading  # 用于线程锁和线程管理
 
-# ------------------------------
-# 全局变量（并行处理+正则缓存 + 新增自定义配置全局存储）
-# ------------------------------
-# 正则缓存（全局编译，只解析一次，提升速度）
-english_pattern = re.compile(r'\(([012]\d)[^()]*?[\u4e00-\u9fa5][^()]{0,10}\)')  # 英文小括号
-chinese_pattern = re.compile(r'（([012]\d)[^（）]*?[\u4e00-\u9fa5][^（）]{0,10}）')  # 中文小括号
-k_pattern = re.compile(r'\[([012]\d)[^\]]*?[\u4e00-\u9fa5][^\]]{0,10}\]')  # 英文中括号
 
 # ========== 新增：用户自定义配置全局变量 ==========
 user_config = {
-    "header_text": "泉尚优学：学为人师，行为世范！",  # 自定义页眉文本
-    "custom_replace_regex": "",  # 用户自定义替换正则，多行分隔
-    "custom_outline_regex": ""   # 用户自定义大纲一级匹配正则
+    "header_text": "泉尚优学：学为人师，行为世范！",
+    "custom_replace_regex": r"""
+\(([012]\d)[^()]*?[\u4e00-\u9fa5][^()]{0,10}\)
+（([012]\d)[^（）]*?[\u4e00-\u9fa5][^（）]{0,10}）
+\[([012]\d)[^\]]*?[\u4e00-\u9fa5][^\]]{0,10}\]
+（[^）]*公众号[^）]*）
+# 示例：#开头为注释行，不会执行
+# 可以在这里自己新增正则
+""",
+    "custom_outline_regex": ""
 }
 
 # 并行处理进度统计（线程安全）
@@ -314,69 +314,74 @@ def add_centered_page_number(doc):
         run._element.rPr.rFonts.set(qn('w:eastAsia'), "宋体")
         run.font.size = Pt(12)
 
-
 def replace_patterns_in_paragraph(paragraph):
     """
-    【修改】增加用户自定义正则匹配替换，原有正则保留，新增用户自定义正则
+    架构完全参照原版代码，内置正则改为从配置文本框读取
     :param paragraph: 需要处理的段落对象
     """
-    text_runs = []  # 存储段落中所有文本片段（包含run对象、文本内容及位置）
-    char_pos = 0  # 字符位置计数器
+    text_runs = []
+    char_pos = 0
 
     for run in paragraph.runs:
         if not run.text:
-            continue  # 跳过空文本
+            continue
         text = run.text
         start = char_pos
         end = char_pos + len(text)
         text_runs.append((run, text, start, end))
-        char_pos = end  # 更新位置
+        char_pos = end
 
     if not text_runs:
-        return  # 无文本则直接返回
+        return
 
-    # 合并所有文本用于匹配
     all_text = ''.join([t[1] for t in text_runs])
-    replaced_ranges = []  # 存储需要替换的文本范围
+    replaced_ranges = []
 
-    # 标记需要替换的范围
     def mark_replaced(match):
         replaced_ranges.append((match.start(), match.end()))
-        return ""  # 替换为空
+        return ""
 
-    # 1. 执行内置三条正则匹配
-    re.sub(chinese_pattern, mark_replaced, all_text)
-    re.sub(english_pattern, mark_replaced, all_text)
-    re.sub(k_pattern, mark_replaced, all_text)
-
-    # 2. 新增：读取用户自定义正则，逐行编译执行
+    # 不再使用硬编码的三个pattern，全部从配置加载
     custom_regex_lines = user_config["custom_replace_regex"].splitlines()
     for reg_str in custom_regex_lines:
         reg_str = reg_str.strip()
-        if not reg_str:
+        # 空行、#开头整行注释直接跳过
+        if not reg_str or reg_str.startswith("#"):
             continue
         try:
             custom_pat = re.compile(reg_str)
             re.sub(custom_pat, mark_replaced, all_text)
         except re.error:
-            # 正则语法错误自动跳过，不中断程序
             continue
 
-    # 创建保留标记（True表示保留，False表示删除）
+    # 合并重叠区间（原版没有合并，这里加上，避免重复标记同一位置）
+    if replaced_ranges:
+        replaced_ranges.sort(key=lambda x: x[0])
+        merged = []
+        for s, e in replaced_ranges:
+            if not merged:
+                merged.append([s, e])
+            else:
+                    last_s, last_e = merged[-1]
+                    if s <= last_e:
+                        merged[-1][1] = max(last_e, e)
+                    else:
+                        merged.append([s, e])
+        replaced_ranges = merged
+
     keep_mask = [True] * len(all_text)
     for start, end in replaced_ranges:
         for i in range(start, end):
             if i < len(keep_mask):
                 keep_mask[i] = False
-
-    # 根据保留标记更新每个run的文本
+    # 和原版完全一致：逐个run筛选字符，原地更新，不删除任何run对象
     for run, original_text, start, end in text_runs:
         kept_chars = []
         for i in range(start, end):
             if i < len(keep_mask) and keep_mask[i]:
-                original_idx = i - start  # 计算在原始文本中的索引
+                original_idx = i - start
                 kept_chars.append(original_text[original_idx])
-        run.text = ''.join(kept_chars)  # 更新run的文本
+        run.text = ''.join(kept_chars)
 
 
 def set_outline_level(doc):
