@@ -25,7 +25,19 @@ user_config = {
 # 示例：#开头为注释行，不会执行
 # 可以在这里自己新增正则
 """,
-    "custom_outline_regex": ""
+    "custom_outline_regex": r"""
+# 题型相关
+(题型|考点|考法|知识点|易错点|重难点)(?:\d+|(?:一|二|三|四|五|六|七|八|九|十|十一|十二|十三|十四|十五|十六|十七|十八|十九|二十)).*
+# 分层选项
+^\s*(?:A夯实基础|B能力提升|C综合素养)\s*$
+# 章节单元
+第(?:\d+|(?:一|二|三|四|五|六|七|八|九|十|十一|十二|十三|十四|十五|十六|十七|十八|十九|二十))(章|单元).*
+# #可以在这里追加自定义大纲正则
+""",
+    "filename_filter_regex": r"""
+# 文件名过滤正则，多行，#为注释；留空则处理全部docx
+# 示例：^试卷.*\.docx$
+"""
 }
 
 # 并行处理进度统计（线程安全）
@@ -43,20 +55,50 @@ convert_doc_btn = None  # DOC转DOCX按钮
 convert_pdf_btn = None  # DOCX转PDF按钮
 total_files = 0  # 并行处理总文件数
 
+def restore_bak_files_action():
+    """遍历文件夹，使用*.bak恢复原文件：xxx.docx.bak → xxx.docx，覆盖现有文件"""
+    folder_path = folder_var.get().replace("已选择：", "")
+    if not folder_path or folder_path == "等待选择文件夹...":
+        messagebox.showwarning("警告", "请先选择文件夹")
+        return
+
+    count_success = 0
+    count_fail = 0
+    error_msg_list = []
+
+    for root_dir, _, filenames in os.walk(folder_path):
+        for fname in filenames:
+            if fname.startswith("~$"):
+                continue
+            if fname.endswith(".bak"):
+                bak_full = os.path.join(root_dir, fname)
+                original_full = bak_full[:-4]  # 去掉 .bak后缀
+                try:
+                    # bak文件重命名覆盖原文件
+                    os.replace(bak_full, original_full)
+                    count_success += 1
+                except Exception as e:
+                    count_fail +=1
+                    error_msg_list.append(f"{fname} 恢复失败:{str(e)}")
+
+    info = f"Bak备份恢复完成\n成功恢复：{count_success} 个\n失败：{count_fail} 个"
+    if error_msg_list:
+        info += "\n\n失败项(前5条):\n" + "\n".join(error_msg_list[:5])
+    messagebox.showinfo("恢复结果", info)
 
 # ------------------------------
 # 【新增】详细设置弹窗函数
 # ------------------------------
 def open_detail_setting_window():
-    """打开详细设置弹窗，编辑页眉、自定义替换正则、大纲匹配正则"""
+    """打开详细设置弹窗，编辑页眉、自定义替换正则、大纲匹配正则、文件名过滤正则"""
     global user_config
     # 创建弹窗
     setting_win = tk.Toplevel(root)
     setting_win.title("详细设置")
-    setting_win.geometry("680x520")
+    setting_win.geometry("680x620")
     setting_win.resizable(False, False)
-    setting_win.transient(root)  # 置顶依附主窗口
-    setting_win.grab_set()  # 模态弹窗，只能操作此窗口
+    setting_win.transient(root)
+    setting_win.grab_set()
 
     main_frame = ttk.Frame(setting_win, padding=15)
     main_frame.pack(fill=tk.BOTH, expand=True)
@@ -67,17 +109,23 @@ def open_detail_setting_window():
     header_entry.insert(0, user_config["header_text"])
     header_entry.pack(pady=(0, 12), fill=tk.X)
 
-    # 2. 自定义替换正则（滚动文本框，每行一条正则）
+    # 2. 自定义替换正则
     ttk.Label(main_frame, text="2. 自定义替换正则（多条请分行填写，匹配内容自动删除）：", font=("Arial", 10, "bold")).pack(anchor=tk.W)
-    replace_text = scrolledtext.ScrolledText(main_frame, width=80, height=6)
+    replace_text = scrolledtext.ScrolledText(main_frame, width=80, height=5)
     replace_text.insert("1.0", user_config["custom_replace_regex"])
     replace_text.pack(pady=(0, 12), fill=tk.BOTH)
 
-    # 3. 自定义大纲一级匹配正则（追加原有规则）
-    ttk.Label(main_frame, text="3. 追加大纲1级匹配正则（多条分行，原有题型规则保留）：", font=("Arial", 10, "bold")).pack(anchor=tk.W)
-    outline_text = scrolledtext.ScrolledText(main_frame, width=80, height=6)
+    # 3. 追加大纲1级匹配正则
+    ttk.Label(main_frame, text="3. 大纲1级匹配正则（多条分行）：", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+    outline_text = scrolledtext.ScrolledText(main_frame, width=80, height=5)
     outline_text.insert("1.0", user_config["custom_outline_regex"])
     outline_text.pack(pady=(0, 12), fill=tk.BOTH)
+
+    # 4. 新增：文件名过滤正则
+    ttk.Label(main_frame, text="4. 文件名过滤正则（多行，#注释；空=处理全部docx）：", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+    filename_filter_text = scrolledtext.ScrolledText(main_frame, width=80, height=4)
+    filename_filter_text.insert("1.0", user_config["filename_filter_regex"])
+    filename_filter_text.pack(pady=(0, 12), fill=tk.BOTH)
 
     # 底部按钮区域
     btn_frame = ttk.Frame(main_frame)
@@ -86,20 +134,21 @@ def open_detail_setting_window():
     def save_config():
         """保存用户填写的配置到全局变量"""
         global user_config
-        # 读取输入内容
         new_header = header_entry.get().strip()
         new_replace_regex = replace_text.get("1.0", tk.END).strip()
         new_outline_regex = outline_text.get("1.0", tk.END).strip()
-        # 更新全局配置
+        new_filename_filter = filename_filter_text.get("1.0", tk.END).strip()
+
         user_config["header_text"] = new_header
         user_config["custom_replace_regex"] = new_replace_regex
         user_config["custom_outline_regex"] = new_outline_regex
+        user_config["filename_filter_regex"] = new_filename_filter
+
         messagebox.showinfo("保存成功", "自定义设置已保存，处理Word时立即生效！")
         setting_win.destroy()
 
     ttk.Button(btn_frame, text="保存设置", command=save_config).grid(row=0, column=0, padx=10)
     ttk.Button(btn_frame, text="取消", command=setting_win.destroy).grid(row=0, column=1, padx=10)
-
 
 # ------------------------------
 # 通用工具函数
@@ -109,6 +158,20 @@ def select_folder():
     folder_path = filedialog.askdirectory(title="选择文件夹")
     return folder_path if folder_path else None
 
+def get_filename_filter_patterns():
+    """解析配置中的文件名过滤正则，跳过空行/#注释；返回编译后的正则列表，空列表代表不过滤"""
+    text = user_config["filename_filter_regex"]
+    patterns = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            pat = re.compile(line)
+            patterns.append(pat)
+        except re.error:
+            continue
+    return patterns
 
 def get_all_files_by_ext(folder_path, exts):
     """
@@ -117,17 +180,23 @@ def get_all_files_by_ext(folder_path, exts):
     :param exts: 扩展名列表（如['.docx', '.doc']）
     :return: 符合条件的文件路径列表
     """
-    exts = [ext.lower() for ext in exts]  # 统一转为小写便于匹配
+    exts = [ext.lower() for ext in exts]
     files = []
-    # 遍历文件夹及其子文件夹
+    filter_pats = get_filename_filter_patterns()
+
     for root_dir, _, filenames in os.walk(folder_path):
         for filename in filenames:
-            # 过滤Word临时文件（以~$开头的文件）
             if filename.startswith('~$'):
                 continue
-            # 检查文件是否符合任一扩展名
-            if any(filename.lower().endswith(ext) for ext in exts):
-                files.append(os.path.join(root_dir, filename))
+            if not any(filename.lower().endswith(ext) for ext in exts):
+                continue
+
+            # 文件名过滤逻辑：无过滤正则直接保留；有任意一条匹配则保留
+            if filter_pats:
+                matched = any(p.search(filename) for p in filter_pats)
+                if not matched:
+                    continue
+            files.append(os.path.join(root_dir, filename))
     return files
 
 
@@ -386,46 +455,32 @@ def replace_patterns_in_paragraph(paragraph):
 
 def set_outline_level(doc):
     """
-    【修改】内置题型正则 + 用户追加自定义正则，合并匹配设置大纲1级
+    全部大纲正则从配置文本框读取，每行一条，#开头为注释
     """
-    # 定义中文数字（扩展常用范围）
-    chinese_nums = r'(?:一|二|三|四|五|六|七|八|九|十|十一|十二|十三|十四|十五|十六|十七|十八|十九|二十)'
-
-    # 内置基础匹配规则
-    base_pattern = (
-            r'(题型|考点|考法|知识点|易错点|重难点)(?:\d+|' + chinese_nums + r').*'
-            r'|^\s*(?:A夯实基础|B能力提升|C综合素养)\s*$'
-            r'|第(?:\d+|' + chinese_nums + r')(章|单元).*'
-    )
-
-    # 拼接用户自定义正则规则
-    custom_lines = user_config["custom_outline_regex"].splitlines()
-    custom_rules = []
-    for line in custom_lines:
+    all_pattern_lines = user_config["custom_outline_regex"].splitlines()
+    pattern_list = []
+    for line in all_pattern_lines:
         line = line.strip()
-        if line:
-            custom_rules.append(line)
-    # 合并所有正则规则，用 | 分隔
-    all_rules = [base_pattern] + custom_rules
-    full_pattern = "|".join(all_rules)
+        if not line or line.startswith("#"):
+            continue
+        pattern_list.append(line)
 
     for para in doc.paragraphs:
         clean_text = para.text.strip()
-        try:
-            if re.search(full_pattern, clean_text):
-                # 获取或创建段落属性元素
-                p_pr = para._element.get_or_add_pPr()
-                # 移除已有的大纲级别设置（避免重复）
-                for elem in p_pr.findall(qn('w:outlineLvl')):
-                    p_pr.remove(elem)
-                # 创建大纲级别元素并设置为1级（Word中0对应1级）
-                outline_level = OxmlElement('w:outlineLvl')
-                outline_level.set(qn('w:val'), '0')
-                p_pr.append(outline_level)
-        except re.error:
-            # 用户正则语法错误，跳过本条段落匹配
+        if not clean_text:
             continue
-
+        for reg_str in pattern_list:
+            try:
+                if re.search(reg_str, clean_text):
+                    p_pr = para._element.get_or_add_pPr()
+                    for elem in p_pr.findall(qn('w:outlineLvl')):
+                        p_pr.remove(elem)
+                    outline_level = OxmlElement('w:outlineLvl')
+                    outline_level.set(qn('w:val'), '0')
+                    p_pr.append(outline_level)
+                    break
+            except re.error:
+                continue
 
 def process_word_file(file_path, keep_backup):
     """
@@ -808,7 +863,6 @@ def parallel_convert_docx_to_pdf(root_dir, use_separate_folder, status_var):
     # 5. 任务完成后显示结果
     root.after(0, lambda: show_convert_result("DOCX→PDF", total, use_separate_folder))
 
-
 # ------------------------------
 # 辅助功能触发函数（替换原函数）
 # ------------------------------
@@ -853,7 +907,7 @@ def main():
     global options, root, process_btn, detail_setting_btn, status_var, folder_var, convert_doc_btn, convert_pdf_btn
     root = tk.Tk()
     root.title("Word文件处理工具（全功能并行版）")
-    root.geometry("700x800")
+    root.geometry("700x500")
     root.resizable(False, False)
 
     # 变量定义
@@ -873,13 +927,35 @@ def main():
     }
     status_var = tk.StringVar(value="就绪")
 
-    # 主框架
-    main_frame = ttk.Frame(root, padding=15)
-    main_frame.pack(fill=tk.BOTH, expand=True)
+    # -------- 新增滚动容器（放在你的界面代码最前面）--------
+    canvas = tk.Canvas(root)
+    v_scroll = ttk.Scrollbar(root, orient="vertical", command=canvas.yview)
+    scroll_inner_frame = ttk.Frame(canvas)
+
+    scroll_inner_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+
+    canvas.create_window((0, 0), window=scroll_inner_frame, anchor="nw")
+    canvas.configure(yscrollcommand=v_scroll.set)
+
+    canvas.pack(side="left", fill=tk.BOTH, expand=True)
+    v_scroll.pack(side="right", fill="y")
+
+    # windows鼠标滚轮
+    def _on_mousewheel(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    canvas.bind_all("<MouseWheel>", _on_mousewheel)
+    # -------------------------------------------------------
+
+    # 主内部滚动框架，替代原来main_frame，padding保留
+    scroll_inner_frame.configure(padding=15)
 
     # 文件夹选择区
-    ttk.Label(main_frame, text="工作文件夹:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
-    ttk.Label(main_frame, textvariable=folder_var, wraplength=650).pack(anchor=tk.W, pady=(0, 10))
+    ttk.Label(scroll_inner_frame, text="工作文件夹:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+    ttk.Label(scroll_inner_frame, textvariable=folder_var, wraplength=650).pack(anchor=tk.W, pady=(0, 10))
 
     def select_folder_action():
         """选择文件夹并更新显示"""
@@ -887,18 +963,18 @@ def main():
         if folder:
             folder_var.set(f"已选择：{folder}")
 
-    ttk.Button(main_frame, text="选择文件夹", command=select_folder_action).pack(anchor=tk.W, pady=(0, 20))
+    ttk.Button(scroll_inner_frame, text="选择文件夹", command=select_folder_action).pack(anchor=tk.W, pady=(0, 20))
 
     # ------------------------------
     # 主功能区：Word处理
     # ------------------------------
-    ttk.Separator(main_frame, orient="horizontal").pack(fill=tk.X, pady=10)
-    ttk.Label(main_frame, text="【主功能区：Word文件并行处理】", font=("Arial", 11, "bold")).pack(anchor=tk.W,
-                                                                                               pady=(0, 10))
+    ttk.Separator(scroll_inner_frame, orient="horizontal").pack(fill=tk.X, pady=10)
+    ttk.Label(scroll_inner_frame, text="【主功能区：Word文件并行处理】", font=("Arial", 11, "bold")).pack(anchor=tk.W,
+                                                                                                       pady=(0, 10))
 
     # 处理内容选项
-    ttk.Label(main_frame, text="处理内容选项:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
-    options_frame = ttk.Frame(main_frame)
+    ttk.Label(scroll_inner_frame, text="处理内容选项:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+    options_frame = ttk.Frame(scroll_inner_frame)
     options_frame.pack(fill=tk.X, pady=(0, 10))
 
     # 选项列1
@@ -933,18 +1009,21 @@ def main():
     ).pack(anchor=tk.W, pady=2)
 
     # 保存选项
-    ttk.Label(main_frame, text="文件保存选项:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+    ttk.Label(scroll_inner_frame, text="文件保存选项:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
     ttk.Checkbutton(
-        main_frame,
+        scroll_inner_frame,
         text="保留原文件为.bak备份（不勾选则直接替换源文件）",
         variable=options['keep_backup']
-    ).pack(anchor=tk.W, pady=(0, 15))
+    ).pack(anchor=tk.W, pady=(0, 5))
+
+    # 新增bak恢复按钮
+    ttk.Button(scroll_inner_frame, text="从.bak备份恢复原文件(覆盖当前文件)", command=restore_bak_files_action).pack(
+        anchor=tk.W, pady=(0, 15))
 
     # 状态显示区
-    ttk.Label(main_frame, textvariable=status_var, wraplength=650).pack(anchor=tk.W, pady=(0, 10))
-
+    ttk.Label(scroll_inner_frame, textvariable=status_var, wraplength=650).pack(anchor=tk.W, pady=(0, 10))
     # ========== 修改：按钮并排布局 开始并行处理 + 详细设置 ==========
-    btn_row_frame = ttk.Frame(main_frame)
+    btn_row_frame = ttk.Frame(scroll_inner_frame)
     btn_row_frame.pack(pady=(0, 15))
     # 主处理按钮
     process_btn = ttk.Button(btn_row_frame, text="开始并行处理Word文件", command=process_word_files_action)
@@ -956,34 +1035,34 @@ def main():
     # ------------------------------
     # 辅助功能区：格式转换
     # ------------------------------
-    ttk.Separator(main_frame, orient="horizontal").pack(fill=tk.X, pady=10)
-    ttk.Label(main_frame, text="【辅助功能区：格式转换（并行版）】", font=("Arial", 11, "bold")).pack(anchor=tk.W,
-                                                                                                 pady=(0, 10))
+    ttk.Separator(scroll_inner_frame, orient="horizontal").pack(fill=tk.X, pady=10)
+    ttk.Label(scroll_inner_frame, text="【辅助功能区：格式转换（并行版）】", font=("Arial", 11, "bold")).pack(anchor=tk.W,
+                                                                                                         pady=(0, 10))
 
     # DOC转DOCX
-    ttk.Label(main_frame, text="DOC转DOCX选项:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+    ttk.Label(scroll_inner_frame, text="DOC转DOCX选项:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
     ttk.Checkbutton(
-        main_frame,
+        scroll_inner_frame,
         text="保留源文件（.doc）",
         variable=options['keep_source_doc']
     ).pack(anchor=tk.W, pady=(0, 5))
 
-    convert_doc_btn = ttk.Button(main_frame, text="并行批量转换DOC→DOCX", command=convert_doc_action)
+    convert_doc_btn = ttk.Button(scroll_inner_frame, text="并行批量转换DOC→DOCX", command=convert_doc_action)
     convert_doc_btn.pack(pady=(0, 10))
 
     # DOCX转PDF
-    ttk.Label(main_frame, text="DOCX转PDF选项:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+    ttk.Label(scroll_inner_frame, text="DOCX转PDF选项:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
     ttk.Checkbutton(
-        main_frame,
+        scroll_inner_frame,
         text="保存到docx2pdf文件夹（不勾选则保存到原位置）",
         variable=options['docx2pdf_separate_folder']
     ).pack(anchor=tk.W, pady=(0, 5))
 
-    convert_pdf_btn = ttk.Button(main_frame, text="并行批量转换DOCX→PDF", command=convert_pdf_action)
+    convert_pdf_btn = ttk.Button(scroll_inner_frame, text="并行批量转换DOCX→PDF", command=convert_pdf_action)
     convert_pdf_btn.pack(pady=(0, 10))
 
     # 退出按钮
-    ttk.Button(main_frame, text="退出", command=lambda: [root.destroy(), os._exit(0)]).pack(pady=15)
+    ttk.Button(scroll_inner_frame, text="退出", command=lambda: [root.destroy(), os._exit(0)]).pack(pady=15)
 
     root.mainloop()
 
